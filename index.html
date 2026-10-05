@@ -64,19 +64,12 @@ main{max-width:640px;margin:0 auto;padding:calc(18px + env(safe-area-inset-top,0
 .row-body{padding:0 0 22px}
 .row.complete .row-title{opacity:.6}
 
-/* chalkboard demo: the one loud thing */
-.demo{position:relative;background:var(--board);border-radius:16px;overflow:hidden}
-.demo svg{display:block;width:100%;height:auto}
-.demo .floor{stroke:var(--chalk);stroke-width:2;opacity:.7}
-.limb{stroke:var(--chalk);stroke-width:3.4;stroke-linecap:round;stroke-linejoin:round;fill:none}
-.limb.far{opacity:.5}
-.headc{stroke:var(--chalk);stroke-width:3;fill:none}
-.load{fill:var(--amber)} .hub{fill:var(--board)}
-.ballc{fill:rgba(255,255,255,.1);stroke:var(--chalk);stroke-width:2}
-.bandl{stroke:var(--amber);stroke-width:2.4;stroke-linecap:round}
-.bench{fill:rgba(255,255,255,.16);stroke:var(--chalk);stroke-width:2}
-.sline{stroke:var(--chalk);stroke-width:2;fill:none;stroke-linecap:round}
-.pad{stroke:rgba(255,255,255,.3);stroke-width:9;stroke-linecap:round;fill:none}
+/* 3D demo stage: the one loud thing */
+.demo{position:relative;background:radial-gradient(120% 90% at 50% 45%,#141a17 0%,#060807 70%);border-radius:16px;overflow:hidden}
+.demo canvas{display:block;width:100%;aspect-ratio:5/4;touch-action:pan-y;cursor:grab}
+.demo canvas:active{cursor:grabbing}
+.demo-hint{position:absolute;left:12px;top:10px;color:rgba(242,245,238,.6);font-size:13px;font-weight:500;pointer-events:none}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:3px;background:#3B8BEA;margin-right:6px;vertical-align:0}
 .demo-btn{position:absolute;right:10px;bottom:10px;min-height:36px;padding:0 14px;border-radius:18px;border:1.5px solid rgba(242,245,238,.55);
   background:rgba(10,36,27,.6);color:#F2F5EE;font-size:14px;font-weight:600}
 .equip{margin:12px 0 0;color:var(--muted);font-size:14px}
@@ -181,103 +174,299 @@ nav button[aria-current="page"]::after{content:"";width:22px;height:4px;border-r
 <input type="file" id="importFile" accept="application/json,.json" class="vh" tabindex="-1">
 
 <script>
-/* ---------- Demo figure engine ----------
-   A pose lists where the hip, foot and hand are; knees and elbows are solved
-   with two-bone inverse kinematics. Angles: 0 = up, 90 = right (screen space).
+/* ---------- 3D demo engine ----------
+   World units match a side view: x forward, y down, z sideways (toward camera = +z).
+   Each pose places the hip, feet and hands; knees and elbows are solved in 3D.
 */
-const SEG = { torso: 44, head: 17, thigh: 28, shin: 28, upper: 24, fore: 22 };
-const dirOf = a => [Math.sin(a * Math.PI / 180), -Math.cos(a * Math.PI / 180)];
-const addV = (p, q) => [p[0] + q[0], p[1] + q[1]];
-const scaleV = (v, k) => [v[0] * k, v[1] * k];
+const BODY = { torso: 44, head: 17, thigh: 28, shin: 28, upper: 24, fore: 22, hipW: 8, shW: 14 };
+const V = {
+  add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  mul: (a, k) => [a[0] * k, a[1] * k, a[2] * k],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  len: a => Math.hypot(a[0], a[1], a[2]),
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  norm: a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+  lerp: (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+};
+const dirDeg = a => [Math.sin(a * Math.PI / 180), -Math.cos(a * Math.PI / 180), 0];
 
-function twoBone(a, b, l1, l2, pref) {
-  const dx = b[0] - a[0], dy = b[1] - a[1];
-  const d = Math.hypot(dx, dy) || 0.001;
-  const dd = Math.min(Math.max(d, Math.abs(l1 - l2) + 0.4), l1 + l2 - 0.05);
-  const ux = dx / d, uy = dy / d;
+function ik3(root, target, l1, l2, pole) {
+  const d = V.sub(target, root), dist = V.len(d) || 0.001;
+  const dd = Math.min(Math.max(dist, Math.abs(l1 - l2) + 0.4), l1 + l2 - 0.05);
+  const u = V.mul(d, 1 / dist);
   const along = (l1 * l1 - l2 * l2 + dd * dd) / (2 * dd);
   const h = Math.sqrt(Math.max(l1 * l1 - along * along, 0));
-  const px = a[0] + ux * along, py = a[1] + uy * along;
-  const c1 = [px - uy * h, py + ux * h];
-  const c2 = [px + uy * h, py - ux * h];
-  const dot1 = (c1[0] - px) * pref[0] + (c1[1] - py) * pref[1];
-  const dot2 = (c2[0] - px) * pref[0] + (c2[1] - py) * pref[1];
-  return { mid: dot1 >= dot2 ? c1 : c2, end: [a[0] + ux * dd, a[1] + uy * dd] };
+  let p = V.sub(pole, V.mul(u, V.dot(pole, u)));
+  if (V.len(p) < 1e-4) p = Math.abs(u[1]) < 0.9 ? V.cross(u, [0, 1, 0]) : V.cross(u, [1, 0, 0]);
+  p = V.norm(p);
+  return { mid: V.add(V.add(root, V.mul(u, along)), V.mul(p, h)), end: V.add(root, V.mul(u, dd)) };
 }
 
-function solveLimb(root, target, l1, l2, pref, forcedMid) {
-  if (forcedMid) return [root, forcedMid, target];
-  const r = twoBone(root, target, l1, l2, pref);
-  return [root, r.mid, r.end];
+/* Normalise a pose so two poses can be blended number by number */
+function normSpec(s) {
+  const o = Object.assign({}, s);
+  if (o.neck) { o.T = Math.atan2(o.neck[0] - o.hip[0], -(o.neck[1] - o.hip[1])) * 180 / Math.PI; delete o.neck; }
+  if (o.H === undefined) o.H = o.T;
+  return o;
+}
+function lerpSpec(a, b, t) {
+  const o = {};
+  for (const k of Object.keys(a)) {
+    const x = a[k], y = b[k];
+    if (typeof x === 'number' && typeof y === 'number') o[k] = x + (y - x) * t;
+    else if (Array.isArray(x) && Array.isArray(y) && typeof x[0] === 'number') o[k] = x.map((v, i) => v + (y[i] - v) * t);
+    else o[k] = x;
+  }
+  return o;
 }
 
-function solvePose(p) {
-  if (p.fig) return p.fig;
-  const hip = p.hip;
-  let T = p.T;
-  if (p.neck) T = Math.atan2(p.neck[0] - hip[0], -(p.neck[1] - hip[1])) * 180 / Math.PI;
-  const H = p.H !== undefined ? p.H : T;
-  const neck = addV(hip, scaleV(dirOf(T), SEG.torso));
-  const head = addV(neck, scaleV(dirOf(H), SEG.head));
-  const neckTop = addV(neck, scaleV(dirOf(H), 9.5));
+function solveBody(s, face) {
+  const hip = [s.hip[0], s.hip[1], 0];
+  const neck = V.add(hip, V.mul(dirDeg(s.T), BODY.torso));
+  const head = V.add(neck, V.mul(dirDeg(s.H), BODY.head));
+  const neckTop = V.add(neck, V.mul(dirDeg(s.H), 8));
+  const hw = BODY.hipW, sw = BODY.shW;
+  const hipN = [hip[0], hip[1], hw], hipF = [hip[0], hip[1], -hw];
+  const tdir = dirDeg(s.T);
+  const shBase = V.add(neck, V.mul(tdir, -4));
+  const shN = [shBase[0], shBase[1], sw], shF = [shBase[0], shBase[1], -sw];
 
-  const leg1 = solveLimb(hip, p.foot, SEG.thigh, SEG.shin, p.kp || [1, 0], p.knee);
-  const arm1 = solveLimb(neck, p.hand, SEG.upper, SEG.fore, p.ep || [-0.3, 1], p.elbow);
-  const limbs = [];
-  let leg2, arm2;
-  if (p.foot2) { leg2 = solveLimb(hip, p.foot2, SEG.thigh, SEG.shin, p.kp2 || [1, 0], p.knee2); limbs.push({ pts: leg2, far: true }); }
-  if (p.hand2) { arm2 = solveLimb(neck, p.hand2, SEG.upper, SEG.fore, p.ep2 || [-0.3, 1], p.elbow2); limbs.push({ pts: arm2, far: true }); }
-  limbs.push({ pts: leg1 });
-  limbs.push({ pts: [hip, neck] });
-  limbs.push({ pts: [neck, neckTop] });
-  limbs.push({ pts: arm1 });
-
-  const anchors = { hand: arm1[2], hand2: arm2 ? arm2[2] : null, foot: leg1[2], hip: hip };
-  const props = (p.props || []).map(pr => {
-    const base = typeof pr.at === 'string' ? anchors[pr.at] : pr.at;
-    const out = { t: pr.t, r: pr.r || 7, x: base[0] + (pr.dx || 0), y: base[1] + (pr.dy || 0) };
-    if (pr.to) { const b = anchors[pr.to]; out.x2 = b[0]; out.y2 = b[1]; }
-    return out;
-  });
-  return { head, limbs, props };
-}
-
-function lerpPt(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; }
-function lerpFigure(a, b, t) {
+  const fz = s.footZ !== undefined ? s.footZ : 9;
+  const kp = s.kp || [1, 0];
+  const legN = s.knee ? { mid: [s.knee[0], s.knee[1], fz], end: [s.foot[0], s.foot[1], fz] }
+    : ik3(hipN, [s.foot[0], s.foot[1], fz], BODY.thigh, BODY.shin, [kp[0], kp[1], 0.15]);
+  let legF;
+  if (s.foot2) {
+    const fz2 = s.foot2Z !== undefined ? s.foot2Z : fz, kp2 = s.kp2 || kp;
+    legF = s.knee2 ? { mid: [s.knee2[0], s.knee2[1], -fz2], end: [s.foot2[0], s.foot2[1], -fz2] }
+      : ik3(hipF, [s.foot2[0], s.foot2[1], -fz2], BODY.thigh, BODY.shin, [kp2[0], kp2[1], -0.15]);
+  } else {
+    legF = s.knee ? { mid: [s.knee[0], s.knee[1], -fz], end: [s.foot[0], s.foot[1], -fz] }
+      : ik3(hipF, [s.foot[0], s.foot[1], -fz], BODY.thigh, BODY.shin, [kp[0], kp[1], -0.15]);
+  }
+  const hz = s.handZ !== undefined ? s.handZ : sw;
+  const ep = s.ep || [-0.3, 1, 0.2];
+  const armN = s.elbow ? { mid: [s.elbow[0], s.elbow[1], sw + 2], end: [s.hand[0], s.hand[1], hz] }
+    : ik3(shN, [s.hand[0], s.hand[1], hz], BODY.upper, BODY.fore, [ep[0], ep[1], ep[2] || 0.2]);
+  let armF;
+  if (s.hand2) {
+    const hz2 = s.hand2Z !== undefined ? s.hand2Z : sw, ep2 = s.ep2 || ep;
+    armF = ik3(shF, [s.hand2[0], s.hand2[1], -hz2], BODY.upper, BODY.fore, [ep2[0], ep2[1], -(ep2[2] || 0.2)]);
+  } else {
+    armF = s.elbow ? { mid: [s.elbow[0], s.elbow[1], -(sw + 2)], end: [s.hand[0], s.hand[1], -hz] }
+      : ik3(shF, [s.hand[0], s.hand[1], -hz], BODY.upper, BODY.fore, [ep[0], ep[1], -(ep[2] || 0.2)]);
+  }
+  const toe = (knee, ankle) => {
+    const sd = V.norm(V.sub(ankle, knee));
+    return V.add(ankle, V.mul(V.norm([sd[1] * face, -sd[0] * face, 0]), 9));
+  };
   return {
-    head: lerpPt(a.head, b.head, t),
-    limbs: a.limbs.map((l, i) => ({ far: l.far, pts: l.pts.map((pt, j) => lerpPt(pt, b.limbs[i].pts[j], t)) })),
-    props: a.props.map((pr, i) => {
-      const q = b.props[i];
-      const o = { t: pr.t, r: pr.r + (q.r - pr.r) * t, x: pr.x + (q.x - pr.x) * t, y: pr.y + (q.y - pr.y) * t };
-      if (pr.x2 !== undefined) { o.x2 = pr.x2 + (q.x2 - pr.x2) * t; o.y2 = pr.y2 + (q.y2 - pr.y2) * t; }
-      return o;
-    })
+    hip, neck, head, neckTop, tdir, hipN, hipF, shN, shF,
+    kneeN: legN.mid, ankleN: legN.end, toeN: toe(legN.mid, legN.end),
+    kneeF: legF.mid, ankleF: legF.end, toeF: toe(legF.mid, legF.end),
+    elbN: armN.mid, wrN: armN.end, elbF: armF.mid, wrF: armF.end,
+    oneSided: !!s.hand2
   };
 }
 
-const f1 = n => n.toFixed(1);
-function figureMarkup(f) {
-  let s = '';
-  const ordered = f.limbs.filter(l => l.far).concat(f.limbs.filter(l => !l.far));
-  for (const l of ordered) {
-    s += '<polyline class="limb' + (l.far ? ' far' : '') + '" points="' + l.pts.map(p => f1(p[0]) + ',' + f1(p[1])).join(' ') + '"/>';
-  }
-  s += '<circle class="headc" cx="' + f1(f.head[0]) + '" cy="' + f1(f.head[1]) + '" r="7.5"/>';
-  for (const p of f.props) {
-    if (p.t === 'band') s += '<line class="bandl" x1="' + f1(p.x) + '" y1="' + f1(p.y) + '" x2="' + f1(p.x2) + '" y2="' + f1(p.y2) + '"/>';
-    else if (p.t === 'ball') s += '<circle class="ballc" cx="' + f1(p.x) + '" cy="' + f1(p.y) + '" r="' + f1(p.r) + '"/>';
-    else {
-      s += '<circle class="load" cx="' + f1(p.x) + '" cy="' + f1(p.y) + '" r="' + f1(p.r) + '"/>';
-      if (p.t === 'plate' || p.t === 'wheel') s += '<circle class="hub" cx="' + f1(p.x) + '" cy="' + f1(p.y) + '" r="2.4"/>';
+/* ---------- Camera ---------- */
+function makeCamera(yawDeg, pitchDeg, W, H) {
+  const ya = yawDeg * Math.PI / 180, pa = pitchDeg * Math.PI / 180;
+  const cy = Math.cos(ya), sy = Math.sin(ya), cp = Math.cos(pa), sp = Math.sin(pa);
+  const s = W / 250, F = 700;
+  return {
+    s,
+    p(pt) {
+      const x = pt[0] - 120, y = pt[1] - 100, z = pt[2];
+      const xr = x * cy - z * sy, zr = x * sy + z * cy;
+      const yr = y * cp + zr * sp, d = zr * cp - y * sp;
+      const k = F / (F - d);
+      return [W / 2 + xr * k * s, H / 2 + (yr + 6) * k * s, d, k * s];
+    },
+    view(n) { // rotate a world direction into camera space
+      const xr = n[0] * cy - n[2] * sy, zr = n[0] * sy + n[2] * cy;
+      return [xr, n[1] * cp + zr * sp, zr * cp - n[1] * sp];
+    }
+  };
+}
+
+/* ---------- Scene building ---------- */
+function buildList(ex, spec, cam) {
+  const face = ex.face || 1;
+  const b = solveBody(spec, face);
+  const work = new Set(ex.work || []);
+  const L = [];
+  const cap = (a, c, ra, rb, col) => {
+    const A = cam.p(a), C = cam.p(c);
+    L.push({ k: 'cap', a: A, b: C, ra: ra * A[3], rb: rb * C[3], d: (A[2] + C[2]) / 2, col });
+  };
+  const sph = (c, r, col, bias) => { const P = cam.p(c); L.push({ k: 'sph', c: P, r: r * P[3], d: P[2] + (bias || 0), col }); };
+  const tone = m => work.has(m) ? 'hi' : 'body';
+
+  // torso: chest bar, ribcage, waist, pelvis
+  const chest = V.add(b.neck, V.mul(b.tdir, -9));
+  const waist = V.add(b.hip, V.mul(b.tdir, 17));
+  const torsoTone = work.has('chest') || work.has('back') ? 'hi' : 'body';
+  cap(V.add(chest, [0, 0, 8]), V.add(chest, [0, 0, -8]), 11, 11, torsoTone);
+  cap(V.add(chest, [0, 0, 4]), V.add(waist, [0, 0, 3]), 10, 8.5, torsoTone);
+  cap(V.add(chest, [0, 0, -4]), V.add(waist, [0, 0, -3]), 10, 8.5, torsoTone);
+  cap(V.add(waist, [0, 0, 3]), V.add(b.hip, [0, 0, 3]), 8.5, 8.5, tone('core'));
+  cap(V.add(waist, [0, 0, -3]), V.add(b.hip, [0, 0, -3]), 8.5, 8.5, tone('core'));
+  cap(b.hipN, b.hipF, 9, 9, tone('glutes'));
+  cap(b.neck, b.neckTop, 4.2, 4, 'body');
+  sph(b.head, 8.6, 'body');
+  // shoulders + arms
+  [[b.shN, b.elbN, b.wrN], [b.shF, b.elbF, b.wrF]].forEach(([sh, el, wr]) => {
+    sph(sh, 6.6, tone('shoulders'), 1.5);
+    cap(sh, el, 4.8, 3.9, tone('arms'));
+    cap(el, wr, 3.8, 2.8, 'body');
+    sph(wr, 3.1, 'body');
+  });
+  // legs
+  [[b.hipN, b.kneeN, b.ankleN, b.toeN], [b.hipF, b.kneeF, b.ankleF, b.toeF]].forEach(([hp, kn, an, to]) => {
+    cap(hp, kn, 7.4, 5.2, tone('thighs'));
+    cap(kn, an, 5.0, 3.4, 'body');
+    cap(an, to, 3.3, 2.6, 'body');
+  });
+
+  // equipment that moves with the body
+  const dumbbell = (c, axis) => {
+    const ax = axis === 'y' ? [0, 1, 0] : [0, 0, 1];
+    cap(V.add(c, V.mul(ax, -5)), V.add(c, V.mul(ax, 5)), 1.7, 1.7, 'iron');
+    cap(V.add(c, V.mul(ax, -9.5)), V.add(c, V.mul(ax, -5.5)), 5.6, 5.6, 'iron');
+    cap(V.add(c, V.mul(ax, 5.5)), V.add(c, V.mul(ax, 9.5)), 5.6, 5.6, 'iron');
+  };
+  (ex.props || []).forEach(pr => {
+    if (pr === 'db') { dumbbell(b.wrN); if (!b.oneSided) dumbbell(b.wrF); }
+    else if (pr === 'goblet') { dumbbell([(b.wrN[0] + b.wrF[0]) / 2, (b.wrN[1] + b.wrF[1]) / 2, 0], 'y'); }
+    else if (pr === 'hipdb') { dumbbell([b.hip[0], b.hip[1] - 11, 0]); }
+    else if (pr === 'trapbar') {
+      const y = b.wrN[1] + 1, x = b.wrN[0];
+      [1, -1].forEach(sg => {
+        const hz = Math.abs(b.wrN[2]);
+        cap([x - 9, y, sg * hz], [x + 9, y, sg * hz], 1.8, 1.8, 'iron');
+        cap([x, y + 1, sg * (hz + 1)], [x, y + 1, sg * 40], 2.1, 2.1, 'iron');
+        cap([x, y + 1, sg * 30], [x, y + 1, sg * 35], 14, 14, 'iron');
+      });
+      cap([x - 9, y, b.wrN[2]], [x - 9, y, b.wrF[2]], 1.6, 1.6, 'iron');
+      cap([x + 9, y, b.wrN[2]], [x + 9, y, b.wrF[2]], 1.6, 1.6, 'iron');
+    } else if (pr === 'wheel') {
+      const c = [b.wrN[0], b.wrN[1] + 5, 0];
+      cap(V.add(c, [0, 0, -3]), V.add(c, [0, 0, 3]), 8.5, 8.5, 'iron');
+      cap([b.wrN[0], b.wrN[1], b.wrN[2]], [b.wrF[0], b.wrF[1], b.wrF[2]], 1.6, 1.6, 'iron');
+    } else if (pr === 'ball') {
+      const c = [(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0];
+      sph(c, 13.5, 'ball');
+    } else if (pr === 'band') {
+      cap(b.wrN, b.wrF, 0.9, 0.9, 'band');
+    }
+  });
+
+  // static equipment
+  (ex.scene3 || []).forEach(o => {
+    if (o.t === 'rod') cap(o.a, o.b, o.r || 1.7, o.r || 1.7, o.col || 'frame');
+    else if (o.t === 'box') boxFaces(o, cam, L);
+  });
+  L.sort((p, q) => p.d - q.d);
+  return L;
+}
+
+function boxFaces(o, cam, L) {
+  const [cx, cy, cz] = o.c, [sx, sy, sz] = o.s.map(v => v / 2);
+  const a = (o.rot || 0) * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a);
+  const rot = v => [v[0] * ca - v[1] * sa, v[0] * sa + v[1] * ca, v[2]];
+  const corner = (i, j, k) => { const r = rot([i * sx, j * sy, k * sz]); return [cx + r[0], cy + r[1], cz + r[2]]; };
+  const faces = [
+    { n: [0, -1, 0], c: [[-1, -1, -1], [1, -1, -1], [1, -1, 1], [-1, -1, 1]] },
+    { n: [0, 1, 0], c: [[-1, 1, -1], [1, 1, -1], [1, 1, 1], [-1, 1, 1]] },
+    { n: [1, 0, 0], c: [[1, -1, -1], [1, 1, -1], [1, 1, 1], [1, -1, 1]] },
+    { n: [-1, 0, 0], c: [[-1, -1, -1], [-1, 1, -1], [-1, 1, 1], [-1, -1, 1]] },
+    { n: [0, 0, 1], c: [[-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]] },
+    { n: [0, 0, -1], c: [[-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1]] }
+  ];
+  const light = V.norm([-0.4, -0.85, 0.45]);
+  faces.forEach(f => {
+    const nw = rot(f.n), nv = cam.view(nw);
+    if (nv[2] <= 0.02) return;
+    const pts = f.c.map(c => cam.p(corner(c[0], c[1], c[2])));
+    const shade = 0.32 + 0.68 * Math.max(0, V.dot(nw, light));
+    L.push({ k: 'poly', pts, d: pts.reduce((s, p) => s + p[2], 0) / 4 - 2, col: o.col || 'pad', shade });
+  });
+}
+
+/* ---------- Drawing ---------- */
+const PALETTE = {
+  body: ['#EEF1F2', '#AEB4B8', '#3E4448'],
+  hi: ['#9FD0FF', '#3B8BEA', '#123F78'],
+  iron: ['#7A8086', '#2E3236', '#0E1012'],
+  frame: ['#F1F3F4', '#BFC5C9', '#62696E'],
+  ball: ['#DDE3E6', '#8E979C', '#353B3F'],
+  band: ['#FFD66B', '#F0B429', '#A06B00'],
+  pad: [42, 46, 51]
+};
+const LIGHT2 = [-0.55, -0.83];
+
+function drawList(ctx, L) {
+  for (const it of L) {
+    if (it.k === 'poly') {
+      const base = it.col === 'frame' ? [210, 215, 218] : PALETTE.pad;
+      const c = base.map(v => Math.round(v * it.shade + (it.col === 'frame' ? 0 : 14 * it.shade)));
+      ctx.fillStyle = 'rgb(' + c.join(',') + ')';
+      ctx.beginPath(); it.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
+      continue;
+    }
+    const pal = PALETTE[it.col];
+    if (it.k === 'sph') {
+      const [x, y] = it.c, r = it.r;
+      const g = ctx.createRadialGradient(x + LIGHT2[0] * r * 0.45, y + LIGHT2[1] * r * 0.45, r * 0.08, x, y, r * 1.05);
+      g.addColorStop(0, pal[0]); g.addColorStop(0.55, pal[1]); g.addColorStop(1, pal[2]);
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      continue;
+    }
+    const [ax, ay] = it.a, [bx, by] = it.b, ra = it.ra, rb = it.rb;
+    const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy);
+    let nx = d > 0.01 ? -dy / d : 1, ny = d > 0.01 ? dx / d : 0;
+    if (nx * LIGHT2[0] + ny * LIGHT2[1] < 0) { nx = -nx; ny = -ny; }
+    const mx = (ax + bx) / 2, my = (ay + by) / 2, rm = Math.max(ra, rb);
+    const g = ctx.createLinearGradient(mx + nx * rm, my + ny * rm, mx - nx * rm, my - ny * rm);
+    g.addColorStop(0, pal[0]); g.addColorStop(0.42, pal[1]); g.addColorStop(1, pal[2]);
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(ax, ay, ra, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(bx, by, rb, 0, Math.PI * 2); ctx.fill();
+    if (d > Math.abs(ra - rb)) {
+      const th = Math.atan2(dy, dx), ph = Math.acos((ra - rb) / d);
+      ctx.beginPath();
+      ctx.moveTo(ax + ra * Math.cos(th + ph), ay + ra * Math.sin(th + ph));
+      ctx.lineTo(bx + rb * Math.cos(th + ph), by + rb * Math.sin(th + ph));
+      ctx.lineTo(bx + rb * Math.cos(th - ph), by + rb * Math.sin(th - ph));
+      ctx.lineTo(ax + ra * Math.cos(th - ph), ay + ra * Math.sin(th - ph));
+      ctx.closePath(); ctx.fill();
     }
   }
-  return s;
+}
+
+function drawStage(ctx, W, H, cam, ex) {
+  ctx.clearRect(0, 0, W, H);
+  // faint floor disc so the figure has somewhere to stand
+  const pts = [];
+  for (let i = 0; i < 40; i++) { const a = i / 40 * Math.PI * 2; pts.push(cam.p([120 + Math.cos(a) * 92, 153, Math.sin(a) * 50])); }
+  const c = cam.p([120, 153, 0]);
+  const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], 92 * c[3]);
+  g.addColorStop(0, 'rgba(255,255,255,0.10)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = g; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
+}
+
+function renderFrame(ctx, W, H, ex, t, yaw, pitch) {
+  const cam = makeCamera(yaw, pitch, W, H);
+  const a = normSpec(ex.start), b = normSpec(ex.end);
+  const spec = lerpSpec(a, b, t);
+  drawStage(ctx, W, H, cam, ex);
+  drawList(ctx, buildList(ex, spec, cam));
 }
 
 
 /* ---------- Plan data ---------- */
-const BENCH_PROPS_DB = [{ t: 'db', at: 'hand', r: 6.5 }];
 
 const EXERCISES = {
   trapbar: {
@@ -286,9 +475,6 @@ const EXERCISES = {
     cues: ['Stand inside the bar, feet hip-width, and grip the handles with your chest up.',
            'Push the floor away and stand tall, squeezing your glutes at the top.',
            'Lower with control and keep your back flat the whole way.'],
-    scene: '',
-    start: { hip: [90, 118], T: 50, H: 38, foot: [110, 152], kp: [1, 0], hand: [123, 133], props: [{ t: 'plate', at: 'hand', dy: 8, r: 11 }] },
-    end:   { hip: [110, 96], T: 0, H: 0, foot: [110, 152], kp: [1, 0], hand: [110, 98], props: [{ t: 'plate', at: 'hand', dy: 8, r: 11 }] }
   },
   dbbench: {
     name: 'Dumbbell bench press', sets: 3, reps: [8, 10], rest: 90, inc: 5,
@@ -296,9 +482,6 @@ const EXERCISES = {
     cues: ['Pull your shoulder blades back and down, and plant your feet.',
            'Lower until your upper arms are about level with the bench.',
            'Press up and slightly in, ending with the dumbbells over your shoulders.'],
-    scene: '<rect class="bench" x="44" y="124" width="92" height="8" rx="3"/><path class="sline" d="M54 132V152M126 132V152"/>',
-    start: { hip: [112, 120], T: -90, H: -90, foot: [146, 152], kp: [0.4, -1], hand: [72, 102], ep: [1, 0.3], props: BENCH_PROPS_DB },
-    end:   { hip: [112, 120], T: -90, H: -90, foot: [146, 152], kp: [0.4, -1], hand: [70, 74], ep: [1, 0.3], props: BENCH_PROPS_DB }
   },
   row1: {
     name: 'One-arm dumbbell row', sets: 3, reps: [10, 12], side: true, rest: 60, inc: 5,
@@ -306,11 +489,6 @@ const EXERCISES = {
     cues: ['Put one hand and the same-side knee on the bench with your back flat.',
            'Pull your elbow toward your hip, not up to your shoulder.',
            'Pause at the top, then lower until your arm is straight.'],
-    scene: '<rect class="bench" x="66" y="124" width="106" height="8" rx="3"/><path class="sline" d="M78 132V152M160 132V152"/>',
-    start: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], kp: [-1, 0], knee2: [136, 123], foot2: [164, 123],
-             hand: [95, 132], ep: [-0.5, 1], hand2: [88, 123], ep2: [1, 0.3], props: BENCH_PROPS_DB },
-    end:   { hip: [136, 96], T: -78, H: -62, foot: [144, 152], kp: [-1, 0], knee2: [136, 123], foot2: [164, 123],
-             hand: [112, 104], ep: [0.5, -1], hand2: [88, 123], ep2: [1, 0.3], props: BENCH_PROPS_DB }
   },
   pullapart: {
     name: 'Band pull-apart', sets: 2, reps: [15, 20], bw: true, rest: 45, inc: 0,
@@ -318,15 +496,6 @@ const EXERCISES = {
     cues: ['Hold the band at chest height with straight arms.',
            'Pull your hands apart and squeeze your shoulder blades together.',
            'Let the band back in slowly. Keep it light and smooth.'],
-    scene: '',
-    start: { fig: { head: [120, 38], props: [{ t: 'band', r: 0, x: 116, y: 70, x2: 124, y2: 70 }], limbs: [
-      { pts: [[106, 57], [134, 57]] }, { pts: [[120, 54], [120, 98]] }, { pts: [[120, 54], [120, 46]] },
-      { pts: [[120, 98], [114, 125], [112, 152]] }, { pts: [[120, 98], [126, 125], [128, 152]] },
-      { pts: [[106, 57], [104, 72], [116, 70]] }, { pts: [[134, 57], [136, 72], [124, 70]] }] } },
-    end: { fig: { head: [120, 38], props: [{ t: 'band', r: 0, x: 62, y: 62, x2: 178, y2: 62 }], limbs: [
-      { pts: [[106, 57], [134, 57]] }, { pts: [[120, 54], [120, 98]] }, { pts: [[120, 54], [120, 46]] },
-      { pts: [[120, 98], [114, 125], [112, 152]] }, { pts: [[120, 98], [126, 125], [128, 152]] },
-      { pts: [[106, 57], [84, 60], [62, 62]] }, { pts: [[134, 57], [156, 60], [178, 62]] }] } }
   },
   wheel: {
     name: 'Ab wheel rollout', sets: 3, reps: [6, 10], bw: true, rest: 60, inc: 0,
@@ -334,9 +503,6 @@ const EXERCISES = {
     cues: ['Kneel with the wheel under your shoulders, ribs down and glutes tight.',
            'Roll out only as far as you can keep your lower back flat.',
            'Pull back with your abs, not your hips. Short reps are fine at first.'],
-    scene: '',
-    start: { hip: [104, 120], T: 55, H: 50, knee: [104, 148], foot: [76, 148], hand: [148, 140], ep: [0, 1], props: [{ t: 'wheel', at: 'hand', dy: 6, r: 8 }] },
-    end:   { hip: [114, 122], T: 72, H: 70, knee: [104, 148], foot: [76, 148], hand: [192, 142], ep: [0, 1], props: [{ t: 'wheel', at: 'hand', dy: 6, r: 8 }] }
   },
   goblet: {
     name: 'Goblet squat', sets: 3, reps: [10, 12], rest: 90, inc: 5,
@@ -344,9 +510,6 @@ const EXERCISES = {
     cues: ['Hold one dumbbell against your chest with your elbows pointing down.',
            'Sit down between your hips and keep your knees tracking over your toes.',
            'Drive up through your whole foot and stand tall.'],
-    scene: '',
-    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [116, 66], ep: [0, 1], props: [{ t: 'db', at: 'hand', r: 7 }] },
-    end:   { hip: [90, 122], T: 25, H: 15, foot: [110, 152], kp: [1, 0], hand: [118, 92], ep: [0, 1], props: [{ t: 'db', at: 'hand', r: 7 }] }
   },
   ohp: {
     name: 'Dumbbell overhead press', sets: 3, reps: [8, 10], rest: 90, inc: 5,
@@ -354,9 +517,6 @@ const EXERCISES = {
     cues: ['Stand tall with your ribs down and glutes tight.',
            'Press straight up until your biceps are next to your ears.',
            'Lower to your shoulders with control. Don\u2019t lean back.'],
-    scene: '',
-    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [118, 50], ep: [0.2, 1], props: [{ t: 'db', at: 'hand', r: 7 }] },
-    end:   { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 8], ep: [0.2, 1], props: [{ t: 'db', at: 'hand', r: 7 }] }
   },
   inclinerow: {
     name: 'Incline bench row', sets: 3, reps: [10, 12], rest: 75, inc: 5,
@@ -364,9 +524,6 @@ const EXERCISES = {
     cues: ['Set the bench to about 45\u00B0 and lie chest-down with your head neutral.',
            'Row your elbows up and back, squeezing your shoulder blades.',
            'Lower until your arms hang straight. No bouncing.'],
-    scene: '<path class="pad" d="M110 138L166 82"/><path class="sline" d="M120 128V152M156 92V152"/>',
-    start: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], kp: [0.5, 0.5], hand: [150, 130], ep: [-1, 0.2], props: BENCH_PROPS_DB },
-    end:   { hip: [119, 117], T: 45, H: 45, foot: [92, 152], kp: [0.5, 0.5], hand: [130, 118], elbow: [126, 96], props: BENCH_PROPS_DB }
   },
   rdl: {
     name: 'Dumbbell Romanian deadlift', sets: 3, reps: [10, 12], rest: 90, inc: 5,
@@ -374,9 +531,6 @@ const EXERCISES = {
     cues: ['Keep a soft bend in your knees and push your hips straight back.',
            'Slide the dumbbells down your legs with your back flat.',
            'Stop when your hamstrings stretch, then drive your hips forward to stand.'],
-    scene: '',
-    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 98], ep: [-0.3, 1], props: BENCH_PROPS_DB },
-    end:   { hip: [94, 104], T: 65, H: 50, foot: [110, 152], kp: [1, 0], hand: [120, 118], ep: [-0.3, 1], props: BENCH_PROPS_DB }
   },
   deadbug: {
     name: 'Dead bug', sets: 3, reps: [8, 10], side: true, bw: true, rest: 45, inc: 0,
@@ -384,11 +538,6 @@ const EXERCISES = {
     cues: ['Lie on your back with your arms up and knees bent over your hips.',
            'Press your lower back into the floor, then lower the opposite arm and leg.',
            'Breathe out as you extend. Return and switch sides.'],
-    scene: '',
-    start: { hip: [120, 146], T: -90, H: -90, knee: [120, 118], foot: [148, 118], foot2: [146, 119], kp2: [0, -1],
-             hand: [76, 100], ep: [1, 0], hand2: [80, 102], ep2: [1, 0] },
-    end:   { hip: [120, 146], T: -90, H: -90, knee: [120, 118], foot: [148, 118], foot2: [176, 143], kp2: [0, -1],
-             hand: [30, 146], ep: [1, 0], hand2: [80, 102], ep2: [1, 0] }
   },
   split: {
     name: 'Bulgarian split squat', sets: 3, reps: [8, 10], side: true, rest: 90, inc: 5,
@@ -396,9 +545,6 @@ const EXERCISES = {
     cues: ['Rest your back foot on the bench and step the front foot far enough out.',
            'Lower straight down until your front thigh is about level.',
            'Drive through the front heel. Do all reps on one leg, then switch.'],
-    scene: '<rect class="bench" x="22" y="124" width="54" height="8" rx="3"/><path class="sline" d="M32 132V152M66 132V152"/>',
-    start: { hip: [116, 102], T: 5, H: 5, foot: [138, 152], kp: [1, 0], foot2: [64, 122], kp2: [0, 1], hand: [120, 106], ep: [-0.3, 1], props: BENCH_PROPS_DB },
-    end:   { hip: [112, 124], T: 5, H: 5, foot: [138, 152], kp: [1, 0], foot2: [64, 122], kp2: [0, 1], hand: [118, 128], ep: [-0.3, 1], props: BENCH_PROPS_DB }
   },
   pushup: {
     name: 'Push-up', sets: 3, reps: [8, 15], bw: true, rest: 60, inc: 0,
@@ -406,9 +552,6 @@ const EXERCISES = {
     cues: ['Hands under your shoulders and your body in one straight line.',
            'Lower your chest to just above the floor with elbows about 45\u00B0 out.',
            'Too hard? Put your hands on the bench to make it easier.'],
-    scene: '',
-    start: { hip: [106, 123], neck: [146, 104], H: 60, foot: [56, 148], kp: [0, 1], hand: [150, 150], ep: [-1, 0.2] },
-    end:   { hip: [111, 140], neck: [153, 134], H: 78, foot: [56, 148], kp: [0, 1], hand: [150, 150], ep: [-1, 0.1] }
   },
   thrust: {
     name: 'Dumbbell hip thrust', sets: 3, reps: [10, 12], rest: 75, inc: 10,
@@ -416,9 +559,6 @@ const EXERCISES = {
     cues: ['Rest your upper back on the bench with a dumbbell across your hips.',
            'Drive through your heels until your shins are vertical.',
            'Squeeze your glutes at the top with your chin tucked, then lower.'],
-    scene: '<rect class="bench" x="24" y="124" width="48" height="8" rx="3"/><path class="sline" d="M34 132V152M62 132V152"/>',
-    start: { hip: [100, 142], neck: [66, 114], H: -50, foot: [140, 152], kp: [0.5, -0.5], hand: [100, 134], ep: [0, -1], props: [{ t: 'db', at: 'hand', dy: -4, r: 8 }] },
-    end:   { hip: [112, 116], neck: [68, 116], H: -90, foot: [140, 152], kp: [0.5, -0.5], hand: [112, 108], ep: [0, -1], props: [{ t: 'db', at: 'hand', dy: -4, r: 8 }] }
   },
   ballcurl: {
     name: 'Stability ball hamstring curl', sets: 3, reps: [8, 12], bw: true, rest: 60, inc: 0,
@@ -426,9 +566,6 @@ const EXERCISES = {
     cues: ['Lie on your back with your heels on the ball and lift your hips.',
            'Roll the ball toward your glutes while keeping your hips high.',
            'Extend slowly. If it\u2019s too hard, do it with both heels and a shorter range.'],
-    scene: '',
-    start: { hip: [108, 118], neck: [72, 146], foot: [164, 124], kp: [0, -1], hand: [118, 148], ep: [0, -1], props: [{ t: 'ball', at: 'foot', dx: 4, dy: 13, r: 13 }] },
-    end:   { hip: [108, 118], neck: [72, 146], foot: [128, 126], kp: [0, -1], hand: [118, 148], ep: [0, -1], props: [{ t: 'ball', at: 'foot', dx: 4, dy: 13, r: 13 }] }
   }
 };
 
@@ -446,6 +583,97 @@ const WARMUP = [
   { id: 'pullapart', text: 'Band pull-aparts', detail: '15 easy reps' },
   { id: 'squat', text: 'Bodyweight squat and hip hinge', detail: '10 of each' }
 ];
+
+
+/* ---------- 3D demo data (merged into EXERCISES) ---------- */
+const legRods = (x, top) => [
+  { t: 'rod', a: [x, top, -9], b: [x, 152, -9] }, { t: 'rod', a: [x, top, 9], b: [x, 152, 9] },
+  { t: 'rod', a: [x, 152, -12], b: [x, 152, 12] }
+];
+const EX3 = {
+  trapbar: {
+    face: 1, yaw: 35, work: ['glutes', 'thighs', 'back'], props: ['trapbar'],
+    start: { hip: [90, 118], T: 50, H: 38, foot: [110, 152], kp: [1, 0], hand: [123, 133], handZ: 16, ep: [-0.3, 1, 0.1] },
+    end: { hip: [110, 96], T: 0, H: 0, foot: [110, 152], kp: [1, 0], hand: [110, 98], handZ: 16, ep: [-0.3, 1, 0.1] }
+  },
+  dbbench: {
+    face: 1, yaw: 35, work: ['chest', 'shoulders', 'arms'], props: ['db'],
+    scene3: [{ t: 'box', c: [88, 128, 0], s: [92, 8, 24] }].concat(legRods(54, 132), legRods(126, 132)),
+    start: { hip: [112, 120], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [72, 102], handZ: 18, ep: [1, 0.3, 0.6] },
+    end: { hip: [112, 120], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [70, 74], handZ: 14, ep: [1, 0.3, 0.6] }
+  },
+  row1: {
+    face: -1, yaw: -35, work: ['back', 'arms'], props: ['db'],
+    scene3: [{ t: 'box', c: [119, 128, 0], s: [106, 8, 24] }].concat(legRods(78, 132), legRods(160, 132)),
+    start: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 123], foot2: [164, 123], foot2Z: 5,
+             hand: [95, 132], handZ: 15, ep: [-0.5, 1, 0.2], hand2: [88, 123], hand2Z: 6, ep2: [1, 0.3, 0] },
+    end: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 123], foot2: [164, 123], foot2Z: 5,
+           hand: [112, 104], handZ: 15, ep: [0.5, -1, 0.2], hand2: [88, 123], hand2Z: 6, ep2: [1, 0.3, 0] }
+  },
+  pullapart: {
+    face: 1, yaw: 55, work: ['shoulders', 'back'], props: ['band'],
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [152, 62], handZ: 5, ep: [0, 1, 0.4] },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 62], handZ: 58, ep: [0, 1, 0.4] }
+  },
+  wheel: {
+    face: 1, yaw: 30, work: ['core', 'shoulders'], props: ['wheel'],
+    start: { hip: [104, 120], T: 55, H: 50, knee: [104, 148], foot: [76, 148], hand: [148, 140], handZ: 7, ep: [0, 1, 0.3] },
+    end: { hip: [114, 122], T: 72, H: 70, knee: [104, 148], foot: [76, 148], hand: [192, 142], handZ: 7, ep: [0, 1, 0.3] }
+  },
+  goblet: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['goblet'],
+    start: { hip: [110, 96], T: 0, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [118, 66], handZ: 5, ep: [0, 1, 0.5] },
+    end: { hip: [90, 122], T: 25, H: 15, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [118, 92], handZ: 5, ep: [0, 1, 0.5] }
+  },
+  ohp: {
+    face: 1, yaw: 35, work: ['shoulders', 'arms'], props: ['db'],
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [118, 50], handZ: 20, ep: [0.2, 1, 0.5] },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 8], handZ: 15, ep: [0.2, 1, 0.5] }
+  },
+  inclinerow: {
+    face: 1, yaw: 35, work: ['back', 'arms'], props: ['db'],
+    scene3: [{ t: 'box', c: [138, 110, 0], s: [80, 8, 22], rot: -45 },
+             { t: 'rod', a: [140, 112, 0], b: [140, 152, 0], r: 2.2 }, { t: 'rod', a: [112, 152, 0], b: [170, 152, 0], r: 2 },
+             { t: 'rod', a: [112, 152, -12], b: [112, 152, 12], r: 1.8 }, { t: 'rod', a: [170, 152, -12], b: [170, 152, 12], r: 1.8 }],
+    start: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [150, 130], handZ: 14, ep: [-1, 0.2, 0.3] },
+    end: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [130, 112], handZ: 16, ep: [-1, -0.6, 0.5] }
+  },
+  rdl: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['db'],
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [116, 98], handZ: 10, ep: [-0.3, 1, 0.2] },
+    end: { hip: [94, 104], T: 65, H: 50, foot: [110, 152], kp: [1, 0], hand: [120, 118], handZ: 10, ep: [-0.3, 1, 0.2] }
+  },
+  deadbug: {
+    face: 1, yaw: 30, work: ['core'], props: [],
+    start: { hip: [120, 146], T: -90, H: -90, knee: [120, 118], foot: [148, 118], foot2: [146, 119], kp2: [0, -1],
+             hand: [76, 100], ep: [1, 0, 0], hand2: [80, 102], ep2: [1, 0, 0] },
+    end: { hip: [120, 146], T: -90, H: -90, knee: [120, 118], foot: [148, 118], foot2: [176, 143], kp2: [0, -1],
+           hand: [30, 146], ep: [1, 0, 0], hand2: [80, 102], ep2: [1, 0, 0] }
+  },
+  split: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['db'],
+    scene3: [{ t: 'box', c: [49, 128, 0], s: [54, 8, 24] }].concat(legRods(32, 132), legRods(66, 132)),
+    start: { hip: [116, 102], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [64, 122], foot2Z: 4, kp2: [0, 1], hand: [120, 106], handZ: 17 },
+    end: { hip: [112, 124], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [64, 122], foot2Z: 4, kp2: [0, 1], hand: [118, 128], handZ: 17 }
+  },
+  pushup: {
+    face: 1, yaw: 35, work: ['chest', 'arms', 'shoulders'], props: [],
+    start: { hip: [106, 123], neck: [146, 104], H: 60, foot: [56, 148], footZ: 6, kp: [0, 1], hand: [150, 150], handZ: 18, ep: [-1, 0.2, 0.3] },
+    end: { hip: [111, 140], neck: [153, 134], H: 78, foot: [56, 148], footZ: 6, kp: [0, 1], hand: [150, 150], handZ: 18, ep: [-1, 0.1, 0.5] }
+  },
+  thrust: {
+    face: 1, yaw: 35, work: ['glutes', 'thighs'], props: ['hipdb'],
+    scene3: [{ t: 'box', c: [48, 128, 0], s: [48, 8, 26] }].concat(legRods(34, 132), legRods(62, 132)),
+    start: { hip: [100, 142], neck: [66, 114], H: -50, foot: [140, 152], footZ: 12, kp: [0.5, -0.5], hand: [100, 132], handZ: 12, ep: [0, -1, 0.3] },
+    end: { hip: [112, 116], neck: [68, 116], H: -90, foot: [140, 152], footZ: 12, kp: [0.5, -0.5], hand: [112, 106], handZ: 12, ep: [0, -1, 0.3] }
+  },
+  ballcurl: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['ball'],
+    start: { hip: [108, 118], neck: [72, 146], foot: [164, 124], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] },
+    end: { hip: [108, 118], neck: [72, 146], foot: [128, 126], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] }
+  }
+};
+Object.keys(EX3).forEach(k => Object.assign(EXERCISES[k], EX3[k]));
 
 
 
@@ -545,33 +773,57 @@ function firstIncomplete(day, d) {
 
 /* ---------- Demo animation ---------- */
 let anim = null;
-function stopDemo() { if (anim) { cancelAnimationFrame(anim.raf); anim = null; } }
+function stopDemo() {
+  if (!anim) return;
+  cancelAnimationFrame(anim.raf);
+  window.removeEventListener('resize', anim.onResize);
+  anim = null;
+}
 function mountDemo() {
   stopDemo();
   const box = document.querySelector('.demo[data-ex]');
   if (!box) return;
   const ex = EXERCISES[box.dataset.ex];
-  const a = solvePose(ex.start), b = solvePose(ex.end);
-  const g = box.querySelector('.fig'), btn = box.querySelector('.demo-btn');
+  const cv = box.querySelector('canvas'), btn = box.querySelector('.demo-btn');
+  const ctx = cv.getContext && cv.getContext('2d');
+  if (!ctx) return;
   const ease = x => x < .5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
-  const st = { raf: 0, playing: !reduceMotion, atEnd: false, t0: performance.now(), pausedAt: 0 };
+  const st = { raf: 0, playing: !reduceMotion, atEnd: false, t0: performance.now(), p: 0, yaw: ex.yaw || 35, pitch: 14, W: 0, H: 0 };
   anim = st;
-  const setBtn = () => { btn.textContent = reduceMotion ? (st.atEnd ? 'Show start' : 'Show finish') : (st.playing ? 'Pause' : 'Play'); };
-  const draw = p => { g.innerHTML = figureMarkup(lerpFigure(a, b, p)); };
-  const loop = ts => {
-    if (!st.playing) return;
-    const t = ((ts - st.t0) % 3800) / 3800;
-    const p = t < .1 ? 0 : t < .48 ? ease((t - .1) / .38) : t < .6 ? 1 : 1 - ease((t - .6) / .4);
-    draw(p); st.last = p; st.raf = requestAnimationFrame(loop);
+  const draw = () => { if (st.W) renderFrame(ctx, st.W, st.H, ex, st.p, st.yaw, st.pitch); };
+  const size = () => {
+    const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+    st.W = r.width; st.H = r.height;
+    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   };
-  draw(0); setBtn();
+  st.onResize = () => { size(); draw(); };
+  window.addEventListener('resize', st.onResize);
+  const loop = ts => {
+    if (!st.playing || anim !== st) return;
+    const t = ((ts - st.t0) % 3800) / 3800;
+    st.p = t < .1 ? 0 : t < .48 ? ease((t - .1) / .38) : t < .6 ? 1 : 1 - ease((t - .6) / .4);
+    draw(); st.raf = requestAnimationFrame(loop);
+  };
+  const setBtn = () => { btn.textContent = reduceMotion ? (st.atEnd ? 'Show start' : 'Show finish') : (st.playing ? 'Pause' : 'Play'); };
+  size(); draw(); setBtn();
   if (st.playing) st.raf = requestAnimationFrame(loop);
   btn.onclick = () => {
-    if (reduceMotion) { st.atEnd = !st.atEnd; draw(st.atEnd ? 1 : 0); }
+    if (reduceMotion) { st.atEnd = !st.atEnd; st.p = st.atEnd ? 1 : 0; draw(); }
     else if (st.playing) { st.playing = false; cancelAnimationFrame(st.raf); }
-    else { st.playing = true; st.t0 = performance.now(); st.raf = requestAnimationFrame(loop); }
+    else { st.playing = true; st.t0 = performance.now() - st.p * 0; st.raf = requestAnimationFrame(loop); }
     setBtn();
   };
+  // drag sideways to turn the model
+  let dragX = null;
+  cv.onpointerdown = e => { dragX = e.clientX; cv.setPointerCapture(e.pointerId); };
+  cv.onpointermove = e => {
+    if (dragX === null) return;
+    st.yaw += (e.clientX - dragX) * 0.6; dragX = e.clientX;
+    if (!st.playing) draw();
+  };
+  cv.onpointerup = cv.onpointercancel = () => { dragX = null; };
+  cv.ondblclick = () => { st.yaw = ex.yaw || 35; if (!st.playing) draw(); };
 }
 
 /* ---------- Views ---------- */
@@ -614,10 +866,9 @@ function renderToday() {
       + '<span class="pips" aria-label="' + n + ' of ' + rows.length + ' sets done">' + rows.map(r => '<i class="' + (r.done ? 'on' : '') + '"></i>').join('') + '</span></button>';
     if (open) {
       h += '<div class="row-body">'
-        + '<div class="demo" data-ex="' + id + '"><svg viewBox="0 -8 240 168" role="img" aria-label="Demo of ' + esc(ex.name) + '">'
-        + '<line class="floor" x1="8" y1="152" x2="232" y2="152"/>' + ex.scene + '<g class="fig"></g></svg>'
-        + '<button type="button" class="demo-btn"></button></div>'
-        + '<p class="equip">' + esc(ex.equip) + '. Works ' + esc(ex.muscles.toLowerCase()) + (ex.side ? '. Do each side.' : '.') + '</p>'
+        + '<div class="demo" data-ex="' + id + '"><canvas role="img" aria-label="3D demo of ' + esc(ex.name) + '. Drag sideways to turn it."></canvas>'
+        + '<span class="demo-hint" aria-hidden="true">Drag to turn</span><button type="button" class="demo-btn"></button></div>'
+        + '<p class="equip"><span class="swatch" aria-hidden="true"></span>Blue shows the main muscles: ' + esc(ex.muscles.toLowerCase()) + '. You\u2019ll need: ' + esc(ex.equip.toLowerCase()) + (ex.side ? '. Do each side.' : '.') + '</p>'
         + '<ul class="cues">' + ex.cues.map(c => '<li>' + esc(c) + '</li>').join('') + '</ul>'
         + '<a class="vid" href="https://www.youtube.com/results?search_query=' + encodeURIComponent(ex.name + ' proper form') + '" target="_blank" rel="noopener">Watch a full video demo</a>'
         + '<div class="sets' + (ex.bw ? ' bw' : '') + '">'
