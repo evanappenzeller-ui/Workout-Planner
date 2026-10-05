@@ -64,14 +64,14 @@ main{max-width:640px;margin:0 auto;padding:calc(18px + env(safe-area-inset-top,0
 .row-body{padding:0 0 22px}
 .row.complete .row-title{opacity:.6}
 
-/* Dance-game demo stage: the one loud thing */
-.demo{position:relative;background:#22094F;border-radius:16px;overflow:hidden}
+/* Demo stage: a lifelike figure in a neutral studio */
+.demo{position:relative;background:#D6DBD8;border-radius:16px;overflow:hidden}
 .demo canvas{display:block;width:100%;aspect-ratio:5/4;touch-action:pan-y;cursor:grab}
 .demo canvas:active{cursor:grabbing}
-.demo-hint{position:absolute;left:12px;top:10px;color:rgba(242,245,238,.7);font-size:13px;font-weight:500;pointer-events:none}
-.swatch{display:inline-block;width:10px;height:10px;border-radius:3px;background:#FFC21F;box-shadow:0 0 6px #FFC21F;margin-right:6px;vertical-align:0}
+.demo-hint{position:absolute;left:12px;top:10px;color:rgba(18,53,42,.7);font-size:13px;font-weight:500;pointer-events:none}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:3px;background:#D9533F;margin-right:6px;vertical-align:0}
 .demo-btn{position:absolute;right:10px;bottom:10px;min-height:36px;padding:0 14px;border-radius:18px;border:1.5px solid rgba(242,245,238,.55);
-  background:rgba(34,9,79,.6);color:#F2F5EE;font-size:14px;font-weight:600}
+  background:rgba(18,53,42,.78);color:#F2F5EE;font-size:14px;font-weight:600}
 .equip{margin:12px 0 0;color:var(--muted);font-size:14px}
 .cues{margin:10px 0 0;padding-left:20px}
 .cues li{margin:5px 0;max-width:62ch}
@@ -309,133 +309,150 @@ function makeCamera(yawDeg, pitchDeg, W, H, fit) {
   };
 }
 
-/* ---------- Coach model ----------
-   A dance-game coach: real proportions and muscle shapes, a colorised outfit,
-   one glowing glove and a ponytail that swings with the movement.
-   Parts are grouped (torso, each arm, each leg, props) so every group gets its
-   own outline where it crosses another, which keeps overlapping limbs readable. */
-const COL = {
-  skin: ['#D3C8FF', '#8C74FF', '#3F22B0'],
-  top: ['#FFB3DE', '#FF3FA4', '#990060'],
-  legs: ['#9DF8F2', '#16BEC4', '#05585F'],
-  shoe: ['#FFFFFF', '#E7EAFF', '#8E94C8'],
-  hair: ['#6A4CC9', '#2C1570', '#120630'],
-  glove: ['#FFFFFF', '#A6F7FF', '#22B3D4'],
-  hi: ['#FFF6BF', '#FFC21F', '#B56A00'],
-  iron: ['#C3CAE0', '#5A6280', '#1B1F31'],
-  ball: ['#FFE6F4', '#FF8DCB', '#A13A76'],
-  band: ['#DAFFA6', '#7CFF4F', '#2C9A10'],
-  frame: ['#ECE6FF', '#A094DE', '#4A3F8A']
+/* ---------- Body model ----------
+   A muscular athlete built from muscle-shaped ellipsoids laid over the skeleton.
+   Each ellipsoid is projected exactly (it stays the right shape from any angle),
+   and soft shading on each one gives the muscle definition. Parts are grouped
+   (torso and head, each arm, each leg, equipment) and the groups are drawn
+   back to front, with a faint edge and a soft cast shadow where they overlap. */
+const MAT = {
+  skin: ['#EEC6A6', '#CB916E', '#965F40', '#6C412C'],
+  shorts: ['#5E656C', '#34393E', '#1E2124', '#131517'],
+  hair: ['#5C4637', '#30231B', '#1B130E', '#120C08'],
+  shoe: ['#FFFFFF', '#E3E5E3', '#B0B4B1', '#8A8E8B'],
+  sole: ['#7C8287', '#50555A', '#2E3236', '#212427'],
+  iron: ['#9CA2A8', '#4B5056', '#23272B', '#141618'],
+  ball: ['#C3CCD6', '#8796A8', '#56637A', '#3D475A'],
+  band: ['#E0907F', '#B54B3F', '#7B2C24', '#5A1E19'],
+  frame: ['#F0F2F3', '#B7BDC2', '#70777D', '#575D62']
 };
-const OUTLINE = '#170436';
-const LIGHT2 = [-0.55, -0.83];
+const EDGE = 'rgba(72,40,24,.38)';
+const LIGHT2 = [-0.5, -0.86];
+const FLOOR = 155;
 
-function stepTail(st, anchor, head, dt) {
-  const N = 6, SEG = 3.6;
-  let settle = !st.tail || (dt === 0 && V.len(V.sub(st.tail[0].p, anchor)) > 0.5);
-  if (!st.tail) st.tail = Array.from({ length: N }, (_, i) => ({ p: [anchor[0], anchor[1] + i * SEG, anchor[2]], o: [anchor[0], anchor[1] + i * SEG, anchor[2]] }));
-  if (!settle && dt === 0) return;
-  const steps = settle ? 150 : Math.min(4, Math.max(1, Math.ceil(dt / 8)));
-  const h = settle ? 0.016 : Math.min(dt, 50) / 1000 / steps;
-  const T = st.tail;
-  for (let s = 0; s < steps; s++) {
-    T[0].p = anchor.slice(); T[0].o = anchor.slice();
-    for (let i = 1; i < N; i++) {
-      const q = T[i], v = V.mul(V.sub(q.p, q.o), 0.95);
-      q.o = q.p; q.p = V.add(V.add(q.p, v), [0, 750 * h * h, 0]);
-    }
-    for (let k = 0; k < 2; k++) for (let i = 1; i < N; i++) {
-      const a = T[i - 1].p, q = T[i], d = V.sub(q.p, a), L = V.len(d) || 1e-3;
-      q.p = V.add(a, V.mul(d, SEG / L));
-      const hd = V.sub(q.p, head), hl = V.len(hd) || 1e-3;
-      if (hl < 8.8) q.p = V.add(head, V.mul(hd, 8.8 / hl));
-      if (q.p[1] > 154) q.p[1] = 154;
-    }
-  }
-}
-
-function buildCoach(ex, spec, cam, st, dt) {
+function buildBody(ex, spec, cam, flat) {
   const face = ex.face || 1, b = solveBody(spec, face), work = new Set(ex.work || []);
-  const rad = Math.PI / 180, t = b.tdir;
+  const rad = Math.PI / 180, t = b.tdir, S = [0, 0, 1];
   const f = [Math.cos(spec.T * rad) * face, Math.sin(spec.T * rad) * face, 0];
   const hd = dirDeg(spec.H), hf = [Math.cos(spec.H * rad) * face, Math.sin(spec.H * rad) * face, 0];
+  // flat: squash everything onto the floor, away from the light, for the cast shadow
+  const M = flat ? p => [p[0] + (FLOOR - p[1]) * 0.25, FLOOR, p[2] - (FLOOR - p[1]) * 0.35] : p => p;
   const groups = [];
   let g, hasHi = false;
   const group = bias => { g = { items: [], bias: bias || 0 }; groups.push(g); };
-  const cap = (a, c, ra, rb, col, hi) => {
-    const A = cam.p(a), C = cam.p(c);
-    g.items.push({ k: 'cap', a: A, b: C, ra: ra * A[3], rb: rb * C[3], d: (A[2] + C[2]) / 2, col, hi: !!hi });
-    if (hi) hasHi = true;
+  const push = (it, mat, tag, layer, bias) => {
+    it.mat = mat; it.hi = !!(tag && work.has(tag)); it.layer = layer || 0; it.d += bias || 0;
+    if (it.hi) hasHi = true;
+    g.items.push(it);
   };
-  const sph = (c, r, col, hi) => {
-    const P = cam.p(c);
-    g.items.push({ k: 'sph', c: P, r: r * P[3], d: P[2], col, hi: !!hi });
-    if (hi) hasHi = true;
+  const cap = (a, c, ra, rb, mat, tag, layer) => {
+    const A = cam.p(M(a)), C = cam.p(M(c));
+    push({ k: 'cap', a: A, b: C, ra: ra * A[3], rb: rb * C[3], d: (A[2] + C[2]) / 2 }, mat, tag, layer);
   };
-  // point offset along the torso (a), toward the chest (c) and sideways (z)
-  const O = (p, a, c, z) => [p[0] + t[0] * a + f[0] * c, p[1] + t[1] * a + f[1] * c, p[2] + (z || 0)];
-  const hiGl = work.has('glutes'), hiCore = work.has('core'), hiChest = work.has('chest'), hiBack = work.has('back');
+  // ellipsoid from a centre and three semi-axis vectors; its outline is the
+  // ellipse whose shape matrix is the sum of the projected axes' outer products
+  const ell = (c, ax, mat, tag, layer, bias) => {
+    const C = cam.p(M(c));
+    let xx = 0, xy = 0, yy = 0;
+    for (const v of ax) {
+      const q = cam.p(M(V.add(c, v))), x = q[0] - C[0], y = q[1] - C[1];
+      xx += x * x; xy += x * y; yy += y * y;
+    }
+    const m = (xx + yy) / 2, r = Math.sqrt(Math.max(0, ((xx - yy) / 2) ** 2 + xy * xy));
+    push({ k: 'ell', c: C, rx: Math.sqrt(m + r), ry: Math.sqrt(Math.max(m - r, 0.01)), ang: 0.5 * Math.atan2(2 * xy, xx - yy), d: C[2] }, mat, tag, layer, bias);
+  };
+  const add = (p, ...terms) => terms.reduce((acc, [v, k]) => V.add(acc, V.mul(v, k)), p);
+  const T = (p, a, fw, z) => add(p, [t, a], [f, fw], [S, z || 0]);
+  const tfs = (a, fw, z) => [V.mul(t, a), V.mul(f, fw), V.mul(S, z)];
 
-  // torso, neck and head (all tapered capsules so the body reads as one smooth shape)
+  /* torso */
   group();
-  const hiTorso = hiChest || hiBack;
-  cap(O(b.hip, 0, 0.5, 7.5), O(b.hip, 0, 0.5, -7.5), 8.6, 8.6, 'legs', hiGl);
-  cap(O(b.hip, -1, -3.4, 4.6), O(b.hip, -1, -3.4, -4.6), 7.4, 7.4, 'legs', hiGl);
-  cap(O(b.hip, 4, 0.6, 3.4), O(b.hip, 18, 0.2, 3.4), 7.6, 6.9, 'skin', hiCore);
-  cap(O(b.hip, 4, 0.6, -3.4), O(b.hip, 18, 0.2, -3.4), 7.6, 6.9, 'skin', hiCore);
-  cap(O(b.hip, 17, 0.4, 4.4), O(b.hip, 34, 0.2, 6.6), 7.8, 9.4, 'top', hiTorso);
-  cap(O(b.hip, 17, 0.4, -4.4), O(b.hip, 34, 0.2, -6.6), 7.8, 9.4, 'top', hiTorso);
-  cap(O(b.hip, 29, 3.2, 4.8), O(b.hip, 29, 3.2, -4.8), 6.2, 6.2, 'top', hiTorso);
-  cap(O(b.neck, -4.5, -1.2, 10), O(b.neck, -4.5, -1.2, -10), 6, 6, 'top', hiTorso);
-  cap(O(b.neck, -3, 0, 0), V.add(b.neck, V.mul(hd, 9)), 3.9, 3.5, 'skin');
-  const head = V.add(b.neck, V.mul(hd, 16.5));
-  const at = (p, up, fwd) => V.add(V.add(p, V.mul(hd, up)), V.mul(hf, fwd));
-  cap(at(head, -4.6, 2.2), at(head, 1.2, 0), 4.9, 7.6, 'skin');
-  cap(at(head, 2.6, -1.6), at(head, -2.4, -3.2), 7.9, 6.4, 'hair');
+  const H0 = b.hip;
+  ell(T(H0, 14, 0, 0), tfs(10, 6.8, 10.6), 'skin', 'core');
+  ell(T(H0, 29, -0.5, 0), tfs(12.4, 8.3, 12.2), 'skin');
+  [1, -1].forEach(sd => {
+    ell(T(H0, 25, -2.4, 8.6 * sd), tfs(11, 4.6, 4.2), 'skin', 'back');
+    ell(T(H0, 34, -5.2, 5.6 * sd), tfs(7, 2.8, 5.4), 'skin', 'back');
+    ell(T(H0, 32.5, 5.8, 5.4 * sd), tfs(5.2, 3.3, 6.2), 'skin', 'chest');
+    ell(T(b.neck, -2.5, -2.2, 5 * sd), tfs(4.2, 3.6, 6.5), 'skin', 'back');
+    for (let i = 0; i < 3; i++) ell(T(H0, 11 + i * 5.1, 6, 2.4 * sd), tfs(2.5, 1.6, 2.2), 'skin', 'core');
+    ell(T(H0, 17, 3.2, 8.4 * sd), tfs(6.5, 3, 2.6), 'skin', 'core');
+  });
+  // shorts sit over the waist
+  ell(T(H0, 2, 0.3, 0), tfs(9.6, 8.1, 12.4), 'shorts', null, 1);
+  ell(T(H0, -0.5, -4.2, 5.4), tfs(7.6, 5.6, 6.6), 'shorts', 'glutes');
+  ell(T(H0, -0.5, -4.2, -5.4), tfs(7.6, 5.6, 6.6), 'shorts', 'glutes');
+  // neck and head (biases keep hair over the skull but under the face)
+  cap(T(b.neck, -4, 0, 0), V.add(b.neck, V.mul(hd, 8)), 5.6, 4.7, 'skin');
+  const head = V.add(b.neck, V.mul(hd, 15.5));
+  const Hh = (up, fw, z) => add(head, [hd, up], [hf, fw], [S, z || 0]);
+  const hfs = (a, fw, z) => [V.mul(hd, a), V.mul(hf, fw), V.mul(S, z)];
+  ell(Hh(1, 0.3), hfs(8.3, 8.8, 7.1), 'skin', null, 0, -3);
+  ell(Hh(3.4, -1.6), hfs(6.8, 8.6, 7.6), 'hair');
+  ell(Hh(-1.2, 4.4), hfs(6.4, 4.8, 6.1), 'skin', null, 0, 0.5);
+  ell(Hh(-4, 2.8), hfs(5, 5.4, 5.6), 'skin', null, 0, 0.3);
+  ell(Hh(-0.6, 8.6), hfs(2.2, 1.5, 1.2), 'skin', null, 0, 0.6);
+  ell(Hh(-0.4, -0.6, 7), hfs(2.6, 1.7, 0.9), 'skin');
+  ell(Hh(-0.4, -0.6, -7), hfs(2.6, 1.7, 0.9), 'skin');
 
-  // ponytail with follow-through
-  const anchor = at(head, 3.2, -7.2);
-  stepTail(st, anchor, head, dt);
-  group();
-  const tail = st.tail;
-  for (let i = 1; i < tail.length; i++) cap(tail[i - 1].p, tail[i].p, 3.4 - i * 0.36, 3.4 - (i + 1) * 0.36, 'hair');
-
-  // arms: near hand wears the glove
+  /* arms */
   const hands = {};
-  [['N', b.shN, b.elbN, b.wrN, 'glove'], ['F', b.shF, b.elbF, b.wrF, 'skin']].forEach(([k, sh, el, wr, handCol]) => {
+  [['N', b.shN, b.elbN, b.wrN, 1], ['F', b.shF, b.elbF, b.wrF, -1]].forEach(([k, sh, el, wr, sd]) => {
     group();
-    const hiA = work.has('arms'), hiS = work.has('shoulders');
-    const mid = V.lerp(sh, el, 0.45), fm = V.lerp(el, wr, 0.3);
-    cap(O(sh, -1.5, 0, 0), V.lerp(sh, el, 0.35), 5.4, 4.5, 'skin', hiS);
-    cap(sh, mid, 4.5, 4.2, 'skin', hiA);
-    cap(mid, el, 4.2, 3.1, 'skin', hiA);
-    cap(el, fm, 3.2, 3.4, 'skin');
-    cap(fm, wr, 3.4, 2.3, 'skin');
-    const u = V.norm(V.sub(wr, el)), hand = V.add(wr, V.mul(u, 4.2));
-    cap(wr, hand, 2.6, 3.2, handCol);
+    const u = V.norm(V.sub(el, sh)), fo = V.norm(V.sub(wr, el));
+    const perp = (v, n) => V.sub(v, V.mul(n, V.dot(v, n)));
+    let v = perp(fo, u);
+    if (V.len(v) < 0.2) v = perp(f, u);
+    if (V.len(v) < 0.2) v = perp(t, u);
+    v = V.norm(v);
+    const w = V.cross(u, v);
+    const ax = (a, b2, c) => [V.mul(u, a), V.mul(v, b2), V.mul(w, c)];
+    cap(sh, el, 4, 3, 'skin');
+    ell(add(sh, [u, 2.2], [S, sd]), ax(6.8, 5.4, 5.4), 'skin', 'shoulders');
+    ell(add(V.lerp(sh, el, 0.55), [v, 1.9]), ax(7, 3.5, 3.4), 'skin', 'arms');
+    ell(add(V.lerp(sh, el, 0.45), [v, -1.8]), ax(8.5, 3.6, 3.9), 'skin', 'arms');
+    const fax = (a, b2, c) => [V.mul(fo, a), V.mul(v, b2), V.mul(w, c)];
+    cap(el, wr, 3.1, 2.1, 'skin');
+    ell(V.lerp(el, wr, 0.27), fax(6.6, 3.3, 3.6), 'skin');
+    const hand = V.add(wr, V.mul(fo, 3.8));
+    ell(hand, fax(4.1, 1.8, 2.7), 'skin');
     hands[k] = hand;
   });
 
-  // legs
-  [[b.hipN, b.kneeN, b.ankleN, b.toeN], [b.hipF, b.kneeF, b.ankleF, b.toeF]].forEach(([hp, kn, an, to]) => {
+  /* legs */
+  [[b.hipN, b.kneeN, b.ankleN, b.toeN, 1], [b.hipF, b.kneeF, b.ankleF, b.toeF, -1]].forEach(([hp, kn, an, to, sd]) => {
     group();
-    const hiT = work.has('thighs');
-    const fd = V.norm(V.sub(to, an)), sd = V.norm(V.sub(an, kn));
-    const th = V.lerp(hp, kn, 0.4), calf = V.sub(V.lerp(kn, an, 0.3), V.mul(fd, 1.2));
-    cap(hp, th, 7.7, 6.6, 'legs', hiT);
-    cap(th, kn, 6.6, 4.6, 'legs', hiT);
-    cap(kn, calf, 4.6, 4.5, 'legs');
-    cap(calf, an, 4.5, 2.9, 'legs');
-    cap(V.add(V.sub(an, V.mul(fd, 3)), V.mul(sd, 1.2)), V.add(to, V.mul(fd, 1.5)), 3.7, 3.1, 'shoe');
+    const u = V.norm(V.sub(kn, hp)), sdir = V.norm(V.sub(an, kn)), fd = V.norm(V.sub(to, an));
+    const perp = (x, n) => V.sub(x, V.mul(n, V.dot(x, n)));
+    let q = V.mul(perp(sdir, u), -1);
+    if (V.len(q) < 0.2) q = perp(fd, u);
+    if (V.len(q) < 0.2) q = perp(f, u);
+    q = V.norm(q);
+    const w = V.cross(u, q), inner = [0, 0, -sd];
+    const ax = (a, b2, c) => [V.mul(u, a), V.mul(q, b2), V.mul(w, c)];
+    cap(hp, kn, 7, 4.4, 'skin');
+    ell(add(V.lerp(hp, kn, 0.5), [q, 2.4]), ax(12, 5, 5.4), 'skin', 'thighs');
+    ell(add(V.lerp(hp, kn, 0.5), [q, -2.6]), ax(11.5, 4.6, 5.2), 'skin', 'thighs');
+    ell(add(V.lerp(hp, kn, 0.78), [q, 1.6], [inner, 2.2]), [V.mul(u, 4.6), V.mul(q, 3.2), [0, 0, 3.4]], 'skin', 'thighs');
+    ell(add(kn, [q, 2.6]), ax(2.6, 1.6, 2.6), 'skin');
+    cap(V.add(hp, V.mul(u, -1)), V.lerp(hp, kn, 0.42), 8, 7.1, 'shorts', null, 1);
+    let fr = perp(fd, sdir);
+    fr = V.len(fr) < 0.2 ? q : V.norm(fr);
+    const w2 = V.cross(sdir, fr);
+    cap(kn, an, 4, 2.5, 'skin');
+    ell(add(V.lerp(kn, an, 0.32), [fr, -2]), [V.mul(sdir, 8.5), V.mul(fr, 3.8), V.mul(w2, 4.4)], 'skin');
+    const heel = add(an, [fd, -3.2], [sdir, 1.2]), toe = add(to, [fd, 1.6]);
+    cap(add(heel, [sdir, 1.3]), add(toe, [sdir, 1.1]), 3, 2.4, 'sole', null, 1);
+    cap(heel, toe, 3.7, 3, 'shoe', null, 2);
   });
 
-  // equipment that moves with the body
+  /* equipment that moves with the body */
   group(2);
   const dumbbell = (c, axis) => {
-    const ax = axis === 'y' ? [0, 1, 0] : [0, 0, 1];
-    cap(V.add(c, V.mul(ax, -5)), V.add(c, V.mul(ax, 5)), 1.7, 1.7, 'iron');
-    cap(V.add(c, V.mul(ax, -9.5)), V.add(c, V.mul(ax, -5.5)), 5.6, 5.6, 'iron');
-    cap(V.add(c, V.mul(ax, 5.5)), V.add(c, V.mul(ax, 9.5)), 5.6, 5.6, 'iron');
+    const a = axis === 'y' ? [0, 1, 0] : [0, 0, 1];
+    cap(V.add(c, V.mul(a, -5)), V.add(c, V.mul(a, 5)), 1.7, 1.7, 'iron');
+    cap(V.add(c, V.mul(a, -9.5)), V.add(c, V.mul(a, -5.5)), 5.6, 5.6, 'iron');
+    cap(V.add(c, V.mul(a, 5.5)), V.add(c, V.mul(a, 9.5)), 5.6, 5.6, 'iron');
   };
   const hN = hands.N, hF = hands.F;
   (ex.props || []).forEach(pr => {
@@ -456,12 +473,13 @@ function buildCoach(ex, spec, cam, st, dt) {
       cap(V.add(c, [0, 0, -3]), V.add(c, [0, 0, 3]), 8.5, 8.5, 'iron');
       cap(hN, hF, 1.6, 1.6, 'iron');
     } else if (pr === 'ball') {
-      sph([(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0], 13.5, 'ball');
+      const c = [(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0];
+      ell(c, [[13.5, 0, 0], [0, 13.5, 0], [0, 0, 13.5]], 'ball');
     } else if (pr === 'band') cap(hN, hF, 0.9, 0.9, 'band');
   });
 
   groups.forEach(gr => {
-    gr.items.sort((p, q) => p.d - q.d);
+    gr.items.sort((p, q) => p.layer - q.layer || p.d - q.d);
     gr.d = gr.items.length ? gr.items.reduce((s, it) => s + it.d, 0) / gr.items.length + gr.bias : 0;
   });
   return { groups: groups.filter(gr => gr.items.length).sort((p, q) => p.d - q.d), hasHi };
@@ -491,53 +509,78 @@ function boxFaces(o, cam, L) {
 }
 
 /* ---------- Drawing ---------- */
-function pathItem(ctx, it, grow) {
-  ctx.beginPath();
-  if (it.k === 'sph') { ctx.arc(it.c[0], it.c[1], it.r + grow, 0, Math.PI * 2); return; }
+// Add one part's outline to the current path (all parts wind the same way,
+// so several can be filled together as one silhouette)
+function addPath(ctx, it, grow) {
+  if (it.k === 'ell') { ctx.moveTo(it.c[0] + (it.rx + grow) * Math.cos(it.ang), it.c[1] + (it.rx + grow) * Math.sin(it.ang)); ctx.ellipse(it.c[0], it.c[1], it.rx + grow, it.ry + grow, it.ang, 0, Math.PI * 2); return; }
   const A = it.a, B = it.b, ra = it.ra + grow, rb = it.rb + grow;
   const dx = B[0] - A[0], dy = B[1] - A[1], d = Math.hypot(dx, dy);
-  if (d <= Math.abs(ra - rb) + 0.01) { const c = ra > rb ? A : B; ctx.arc(c[0], c[1], Math.max(ra, rb), 0, Math.PI * 2); return; }
+  if (d <= Math.abs(ra - rb) + 0.01) {
+    const c = ra > rb ? A : B, r = Math.max(ra, rb);
+    ctx.moveTo(c[0] + r, c[1]); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); return;
+  }
   const th = Math.atan2(dy, dx), ph = Math.acos((ra - rb) / d);
+  ctx.moveTo(A[0] + ra * Math.cos(th + ph), A[1] + ra * Math.sin(th + ph));
   ctx.arc(A[0], A[1], ra, th + ph, th - ph + Math.PI * 2);
   ctx.arc(B[0], B[1], rb, th - ph, th + ph);
   ctx.closePath();
 }
 
-function fillFor(ctx, it, pal) {
-  let g;
-  if (it.k === 'sph') {
-    const [x, y] = it.c, r = it.r;
-    g = ctx.createRadialGradient(x + LIGHT2[0] * r * 0.4, y + LIGHT2[1] * r * 0.4, r * 0.1, x, y, r * 1.05);
-    g.addColorStop(0, pal[0]); g.addColorStop(0.6, pal[1]); g.addColorStop(1, pal[2]);
-    return g;
+// Each part is a flat base colour plus a soft see-through light/shade layer.
+// Neighbouring parts melt together; only a gentle crease shows where one
+// muscle lies over another, which is what gives the body its definition.
+const SHADE = {
+  skin: ['rgba(255,236,218,.34)', 'rgba(255,236,218,0)', 'rgba(74,32,14,.12)', 'rgba(74,32,14,.42)'],
+  hair: ['rgba(255,240,225,.16)', 'rgba(255,240,225,0)', 'rgba(0,0,0,.12)', 'rgba(0,0,0,.35)'],
+  cloth: ['rgba(255,255,255,.16)', 'rgba(255,255,255,0)', 'rgba(0,0,0,.14)', 'rgba(0,0,0,.42)']
+};
+function fillPart(ctx, it) {
+  const pal = MAT[it.mat], sh = SHADE[it.mat === 'skin' ? 'skin' : it.mat === 'hair' ? 'hair' : 'cloth'];
+  const stops = g => { g.addColorStop(0, sh[0]); g.addColorStop(0.45, sh[1]); g.addColorStop(0.8, sh[2]); g.addColorStop(1, sh[3]); return g; };
+  ctx.fillStyle = pal[1];
+  ctx.beginPath(); addPath(ctx, it, 0); ctx.fill();
+  if (it.k === 'ell') {
+    const ca = Math.cos(-it.ang), sa = Math.sin(-it.ang);
+    const lx = LIGHT2[0] * ca - LIGHT2[1] * sa, ly = LIGHT2[0] * sa + LIGHT2[1] * ca;
+    ctx.save();
+    ctx.translate(it.c[0], it.c[1]); ctx.rotate(it.ang); ctx.scale(Math.max(it.rx, 0.01), Math.max(it.ry, 0.01));
+    ctx.fillStyle = stops(ctx.createRadialGradient(lx * 0.42, ly * 0.42, 0.05, 0, 0, 1));
+    ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    return;
   }
   const [ax, ay] = it.a, [bx, by] = it.b, dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy);
   let nx = d > 0.01 ? -dy / d : 1, ny = d > 0.01 ? dx / d : 0;
   if (nx * LIGHT2[0] + ny * LIGHT2[1] < 0) { nx = -nx; ny = -ny; }
   const mx = (ax + bx) / 2, my = (ay + by) / 2, rm = Math.max(it.ra, it.rb);
-  g = ctx.createLinearGradient(mx + nx * rm, my + ny * rm, mx - nx * rm, my - ny * rm);
-  g.addColorStop(0, pal[0]); g.addColorStop(0.45, pal[1]); g.addColorStop(1, pal[2]);
-  return g;
+  ctx.fillStyle = stops(ctx.createLinearGradient(mx + nx * rm, my + ny * rm, mx - nx * rm, my - ny * rm));
+  ctx.beginPath(); addPath(ctx, it, 0); ctx.fill();
 }
 
-// Toon pass: each group gets one outline, then its fills, so limbs read
-// separately while a group's own parts merge into one smooth shape.
-// The muscle layer mirrors the same occlusion so only visible worked muscles glow.
-function paintCoach(cctx, hctx, groups, lw) {
-  for (const gr of groups) {
-    cctx.fillStyle = OUTLINE;
-    for (const it of gr.items) { pathItem(cctx, it, lw); cctx.fill(); }
-    for (const it of gr.items) { pathItem(cctx, it, 0); cctx.fillStyle = fillFor(cctx, it, COL[it.col]); cctx.fill(); }
-    if (!hctx) continue;
-    hctx.globalCompositeOperation = 'destination-out'; hctx.fillStyle = '#000';
-    for (const it of gr.items) { pathItem(hctx, it, lw); hctx.fill(); }
-    for (const it of gr.items) {
-      pathItem(hctx, it, 0);
-      if (it.hi) { hctx.globalCompositeOperation = 'source-over'; hctx.fillStyle = fillFor(hctx, it, COL.hi); }
-      else { hctx.globalCompositeOperation = 'destination-out'; hctx.fillStyle = '#000'; }
-      hctx.fill();
+// Groups back to front. Each casts a faint shadow onto what is already drawn,
+// gets a thin edge, then its shaded parts. The muscle layer mirrors the same
+// occlusion so only the visible worked muscles are tinted.
+function paintBody(cctx, hctx, groups, lw) {
+  groups.forEach((gr, gi) => {
+    if (gi) {
+      cctx.save();
+      cctx.globalCompositeOperation = 'source-atop'; cctx.translate(1.5, 2.5);
+      cctx.fillStyle = 'rgba(50,25,12,.16)';
+      cctx.beginPath(); gr.items.forEach(it => addPath(cctx, it, 1.5)); cctx.fill();
+      cctx.restore();
     }
-  }
+    cctx.fillStyle = EDGE;
+    cctx.beginPath(); gr.items.forEach(it => addPath(cctx, it, lw)); cctx.fill();
+    gr.items.forEach(it => fillPart(cctx, it));
+    if (!hctx) return;
+    hctx.globalCompositeOperation = 'destination-out'; hctx.fillStyle = '#000';
+    hctx.beginPath(); gr.items.forEach(it => addPath(hctx, it, lw)); hctx.fill();
+    for (const it of gr.items) {
+      if (it.hi) { hctx.globalCompositeOperation = 'source-over'; hctx.fillStyle = '#E4513E'; }
+      else { hctx.globalCompositeOperation = 'destination-out'; hctx.fillStyle = '#000'; }
+      hctx.beginPath(); addPath(hctx, it, 0); hctx.fill();
+    }
+  });
   if (hctx) hctx.globalCompositeOperation = 'source-over';
 }
 
@@ -546,130 +589,33 @@ function paintScene(ctx, ex, cam, lw) {
   (ex.scene3 || []).forEach(o => {
     if (o.t === 'rod') {
       const A = cam.p(o.a), C = cam.p(o.b), r = o.r || 1.7;
-      L.push({ k: 'cap', a: A, b: C, ra: r * A[3], rb: r * C[3], d: (A[2] + C[2]) / 2 });
+      L.push({ k: 'cap', a: A, b: C, ra: r * A[3], rb: r * C[3], d: (A[2] + C[2]) / 2, mat: 'frame' });
     } else boxFaces(o, cam, L);
   });
   L.sort((p, q) => p.d - q.d);
   for (const it of L) {
     if (it.k === 'poly') {
-      const c = [96, 52, 178].map(v => Math.round(v * it.shade + 18));
+      const c = [44, 47, 52].map(v => Math.round(v * (0.55 + 0.6 * it.shade)));
       ctx.fillStyle = 'rgb(' + c.join(',') + ')';
       ctx.beginPath(); it.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = 'rgba(150,240,255,.75)'; ctx.lineWidth = 1.2; ctx.lineJoin = 'round'; ctx.stroke();
       continue;
     }
-    ctx.fillStyle = OUTLINE; pathItem(ctx, it, lw); ctx.fill();
-    pathItem(ctx, it, 0); ctx.fillStyle = fillFor(ctx, it, COL.frame); ctx.fill();
+    ctx.fillStyle = 'rgba(40,44,48,.5)'; ctx.beginPath(); addPath(ctx, it, lw); ctx.fill();
+    fillPart(ctx, it);
   }
 }
 
-// Fixed sparkle positions (fractions of the stage) so the backdrop is stable
-const BOKEH = Array.from({ length: 18 }, (_, i) => {
-  const r = n => { const v = Math.sin(n) * 43758.5453; return v - Math.floor(v); };
-  return { x: r(i * 12.9898 + 1), y: r(i * 78.233 + 2) * 0.62, s: 0.008 + r(i * 3.7 + 5) * 0.022, sp: 0.15 + r(i * 9.1) * 0.5, c: i % 3 };
-});
-const BOKEH_COL = ['255,120,220', '120,235,255', '255,220,120'];
-
-function drawStage(ctx, W, H, cam, fit, now) {
-  const floorY = cam.p([fit.cx, 155, 0])[1];
-  const horizon = Math.max(H * 0.35, Math.min(floorY - H * 0.12, H * 0.85));
-  let g = ctx.createLinearGradient(0, 0, 0, horizon);
-  g.addColorStop(0, '#22094F'); g.addColorStop(1, '#6E1A8C');
-  ctx.fillStyle = g; ctx.fillRect(0, 0, W, horizon + 1);
-  g = ctx.createLinearGradient(0, horizon, 0, H);
-  g.addColorStop(0, '#3A0D66'); g.addColorStop(1, '#0D0327');
-  ctx.fillStyle = g; ctx.fillRect(0, horizon, W, H - horizon);
-  // backlight behind the coach
-  g = ctx.createRadialGradient(W / 2, H * 0.42, 0, W / 2, H * 0.42, W * 0.62);
-  g.addColorStop(0, 'rgba(255,80,190,.55)'); g.addColorStop(0.5, 'rgba(160,60,220,.22)'); g.addColorStop(1, 'rgba(120,40,200,0)');
+function drawStudio(ctx, W, H, floorY) {
+  const hz = Math.max(0.3, Math.min((floorY - H * 0.16) / H, 0.85));
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#E8EBE9'); g.addColorStop(Math.max(0, hz - 0.06), '#D6DBD8');
+  g.addColorStop(Math.min(1, hz + 0.06), '#C5CCC7'); g.addColorStop(1, '#B0B8B2');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  // sweeping light beams
-  const sec = now / 1000;
-  for (let i = 0; i < 4; i++) {
-    const ox = W * (0.1 + i * 0.27), sway = Math.sin(sec * 0.6 + i * 1.7) * 0.35 + (i - 1.5) * 0.18;
-    const len = H * 1.2, spread = W * 0.09;
-    const tx = ox + Math.sin(sway) * len, ty = Math.cos(sway) * len;
-    g = ctx.createLinearGradient(ox, 0, tx, ty);
-    g.addColorStop(0, i % 2 ? 'rgba(120,235,255,.22)' : 'rgba(255,120,220,.22)'); g.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.moveTo(ox - 3, -4); ctx.lineTo(ox + 3, -4);
-    ctx.lineTo(tx + Math.cos(sway) * spread, ty - Math.sin(sway) * spread);
-    ctx.lineTo(tx - Math.cos(sway) * spread, ty + Math.sin(sway) * spread); ctx.closePath(); ctx.fill();
-  }
-  for (const k of BOKEH) {
-    const y = ((k.y - sec * k.sp * 0.04) % 0.62 + 0.62) % 0.62 * horizon / 0.62;
-    const r = k.s * W, x = k.x * W + Math.sin(sec * k.sp + k.x * 9) * 6;
-    g = ctx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, 'rgba(' + BOKEH_COL[k.c] + ',.55)'); g.addColorStop(1, 'rgba(' + BOKEH_COL[k.c] + ',0)');
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-  }
-  ctx.restore();
-  return { floorY, horizon };
+  const v = ctx.createRadialGradient(W / 2, H * 0.45, Math.min(W, H) * 0.3, W / 2, H * 0.45, Math.max(W, H) * 0.75);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(20,30,25,.22)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
 }
 
-function drawFloorSpot(ctx, W, H, cam, fit) {
-  const pts = [];
-  for (let i = 0; i < 48; i++) { const a = i / 48 * Math.PI * 2; pts.push(cam.p([fit.cx + Math.cos(a) * 70, 155, Math.sin(a) * 48])); }
-  const c = cam.p([fit.cx, 155, 0]);
-  const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], 72 * c[3]);
-  g.addColorStop(0, 'rgba(255,140,230,.45)'); g.addColorStop(0.7, 'rgba(160,90,255,.15)'); g.addColorStop(1, 'rgba(160,90,255,0)');
-  ctx.save();
-  ctx.fillStyle = g; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
-  ctx.strokeStyle = 'rgba(130,240,255,.25)'; ctx.lineWidth = 7; ctx.stroke();
-  ctx.strokeStyle = 'rgba(160,245,255,.9)'; ctx.lineWidth = 1.6; ctx.stroke();
-  ctx.restore();
-}
-
-const POP_WORDS = ['PERFECT', 'SUPER', 'PERFECT', 'YEAH!'];
-function drawPop(ctx, W, H, pop) {
-  const k = pop.k, word = POP_WORDS[pop.n % POP_WORDS.length];
-  const back = x => { const c = 1.9; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
-  const sc = k < 0.18 ? Math.max(0.01, back(k / 0.18)) : 1;
-  const alpha = k > 0.72 ? Math.max(0, 1 - (k - 0.72) / 0.28) : 1;
-  const x = W * 0.73, y = H * 0.15 - k * H * 0.03, size = Math.round(W * 0.085);
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.translate(x, y); ctx.scale(sc, sc); ctx.transform(1, 0, -0.18, 1, 0, 0);
-  ctx.font = '800 ' + size + 'px "Big Shoulders Display", Impact, "Arial Narrow", sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = size * 0.34; ctx.strokeStyle = 'rgba(255,60,170,.35)'; ctx.strokeText(word, 0, 0);
-  ctx.lineWidth = size * 0.16; ctx.strokeStyle = '#3B0A6E'; ctx.strokeText(word, 0, 0);
-  const g = ctx.createLinearGradient(0, -size / 2, 0, size / 2);
-  g.addColorStop(0, '#FFFFFF'); g.addColorStop(0.45, '#FFE36B'); g.addColorStop(1, '#FF5FB8');
-  ctx.fillStyle = g; ctx.fillText(word, 0, 0);
-  ctx.restore();
-  // sparkles burst out from the word
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = '#FFF6C8';
-  for (let i = 0; i < 7; i++) {
-    const a = i / 7 * Math.PI * 2 + 0.4, dist = size * (0.9 + k * 1.6), r = size * 0.13 * (1 - k * 0.7);
-    const sx = x + Math.cos(a) * dist * 1.5, sy = y + Math.sin(a) * dist * 0.6;
-    ctx.beginPath();
-    for (let j = 0; j < 8; j++) { const rr = j % 2 ? r * 0.28 : r, aa = j * Math.PI / 4 + k * 2; ctx.lineTo(sx + Math.cos(aa) * rr, sy + Math.sin(aa) * rr); }
-    ctx.closePath(); ctx.fill();
-  }
-  ctx.restore();
-}
-
-// Soft neon glow without shadowBlur (too slow on phones): shrink the silhouette
-// in two steps, tint it, then let the browser's smoothing blur it back up.
-function makeGlow(src, g4, g8, color) {
-  for (const [L, from] of [[g4, src], [g8, g4.c]]) {
-    L.x.globalCompositeOperation = 'source-over';
-    L.x.clearRect(0, 0, L.c.width, L.c.height);
-    L.x.drawImage(from, 0, 0, L.c.width, L.c.height);
-  }
-  for (const L of [g4, g8]) {
-    L.x.globalCompositeOperation = 'source-in';
-    L.x.fillStyle = color; L.x.fillRect(0, 0, L.c.width, L.c.height);
-  }
-  blurSmall(g4, 1);
-  blurSmall(g8, 3);
-}
 // Box blur on a tiny canvas: average five shifted copies, a few times over
 function blurSmall(L, passes) {
   const w = L.c.width, h = L.c.height, T = L.t;
@@ -682,51 +628,465 @@ function blurSmall(L, passes) {
   }
   L.x.globalCompositeOperation = 'source-over';
 }
-function drawGlow(ctx, W, H, g4, g8, wide, tight) {
+
+// Soft floor shadow: the body flattened onto the floor, drawn small and blurred
+// (much cheaper on phones than a canvas blur filter)
+function drawFloorShadow(ctx, W, H, ex, spec, cam, st) {
+  const { g4, g8 } = st.layers, x = g4.x;
+  x.setTransform(1, 0, 0, 1, 0, 0); x.globalCompositeOperation = 'source-over';
+  x.clearRect(0, 0, g4.c.width, g4.c.height);
+  x.setTransform(g4.c.width / W, 0, 0, g4.c.height / H, 0, 0);
+  x.fillStyle = '#000'; x.beginPath();
+  buildBody(ex, spec, cam, true).groups.forEach(gr => gr.items.forEach(it => addPath(x, it, 0)));
+  x.fill();
+  x.setTransform(1, 0, 0, 1, 0, 0);
+  g8.x.globalCompositeOperation = 'source-over';
+  g8.x.clearRect(0, 0, g8.c.width, g8.c.height);
+  g8.x.drawImage(g4.c, 0, 0, g8.c.width, g8.c.height);
+  blurSmall(g8, 3); blurSmall(g4, 1);
   ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = wide;
-  ctx.drawImage(g8.c, 0, 0, W, H);
-  if (tight) { ctx.globalAlpha = tight; ctx.drawImage(g4.c, 0, 0, W, H); ctx.drawImage(g4.c, 0, 0, W, H); }
+  ctx.globalAlpha = 0.28; ctx.drawImage(g8.c, 0, 0, W, H);
+  ctx.globalAlpha = 0.3; ctx.drawImage(g4.c, 0, 0, W, H);
   ctx.restore();
 }
 
-function renderFrame(ctx, W, H, ex, st, now, dt) {
+function renderFrame(ctx, W, H, ex, st) {
   const fit = fitFor(ex), cam = makeCamera(st.yaw, st.pitch, W, H, fit);
   const spec = lerpSpec(normSpec(ex.start), normSpec(ex.end), st.p);
-  if (!reduceMotion) { const beat = Math.sin(st.loopT * Math.PI * 8); spec.H += beat * 2.2; spec.T += beat * 0.6; }
-  const stage = drawStage(ctx, W, H, cam, fit, now);
-  const lw = Math.max(1.1, cam.s * 0.7);
-  const coach = buildCoach(ex, spec, cam, st, dt);
+  drawStudio(ctx, W, H, cam.p([fit.cx, FLOOR, 0])[1]);
+  drawFloorShadow(ctx, W, H, ex, spec, cam, st);
+  const lw = Math.max(0.7, cam.s * 0.4);
+  paintScene(ctx, ex, cam, lw);
+  const body = buildBody(ex, spec, cam, false);
   const { coach: cv, cctx, hi, hctx } = st.layers;
   cctx.clearRect(0, 0, W, H);
-  if (coach.hasHi) hctx.clearRect(0, 0, W, H);
-  paintCoach(cctx, coach.hasHi ? hctx : null, coach.groups, lw);
-
-  // mirror-floor reflection, fading with distance
-  ctx.save();
-  ctx.beginPath(); ctx.rect(0, stage.floorY, W, H - stage.floorY); ctx.clip();
-  ctx.globalAlpha = 0.15; ctx.translate(0, 2 * stage.floorY); ctx.scale(1, -1);
+  if (body.hasHi) hctx.clearRect(0, 0, W, H);
+  paintBody(cctx, body.hasHi ? hctx : null, body.groups, lw);
   ctx.drawImage(cv, 0, 0, W, H);
-  ctx.restore();
-  const fade = ctx.createLinearGradient(0, stage.floorY, 0, Math.min(H, stage.floorY + H * 0.22));
-  fade.addColorStop(0, 'rgba(13,3,39,0)'); fade.addColorStop(1, 'rgba(13,3,39,.85)');
-  ctx.fillStyle = fade; ctx.fillRect(0, stage.floorY, W, H - stage.floorY);
-  drawFloorSpot(ctx, W, H, cam, fit);
-  paintScene(ctx, ex, cam, lw);
-
-  // the coach: neon halo, then a tight white rim
-  const pulse = 0.5 + 0.5 * Math.sin(st.loopT * Math.PI * 4);
-  const { g4, g8 } = st.layers;
-  if (coach.hasHi) {
-    makeGlow(hi, g4, g8, '#FFB21F');
-    drawGlow(ctx, W, H, g4, g8, 0.5 + 0.5 * pulse, 0);
+  if (body.hasHi) {
+    ctx.save(); ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = 0.5;
+    ctx.drawImage(hi, 0, 0, W, H); ctx.restore();
   }
-  makeGlow(cv, g4, g8, '#5FE6FF');
-  drawGlow(ctx, W, H, g4, g8, 1, 0.8);
-  ctx.drawImage(cv, 0, 0, W, H);
-  if (coach.hasHi) { ctx.save(); ctx.globalAlpha = 0.85 + 0.15 * pulse; ctx.drawImage(hi, 0, 0, W, H); ctx.restore(); }
-  if (st.pop) drawPop(ctx, W, H, st.pop);
+}
+
+
+/* ---------- 3D body renderer (WebGL2) ----------
+   The body is a set of muscle-shaped primitives (ellipsoids and tapered limbs)
+   blended into one continuous surface with a smooth union, then ray-marched on
+   the GPU with soft shadows, ambient occlusion and warm skin scattering.
+   The 2D renderer above stays as the fallback when WebGL2 isn't available. */
+const GLM = { skin: 0, skinHi: 1, shorts: 2, hair: 3, shoe: 4, sole: 5, iron: 6, ball: 7, band: 8, pad: 9, steel: 10, shortsHi: 11, cut: -1 };
+const GL_MAXP = 110;
+
+function buildPrims(ex, spec) {
+  const face = ex.face || 1, b = solveBody(spec, face), work = new Set(ex.work || []);
+  const rad = Math.PI / 180, t = b.tdir, S = [0, 0, 1];
+  const f = [Math.cos(spec.T * rad) * face, Math.sin(spec.T * rad) * face, 0];
+  const hd = dirDeg(spec.H), hf = [Math.cos(spec.H * rad) * face, Math.sin(spec.H * rad) * face, 0];
+  const data = new Float32Array(GL_MAXP * 16), groups = [];
+  let n = 0, g = null;
+  const group = () => { g = { start: n, count: 0, pts: [] }; groups.push(g); };
+  const put = (vals, pts) => {
+    if (n >= GL_MAXP) return;
+    data.set(vals, n * 16); n++; g.count++; g.pts.push(...pts);
+  };
+  const skin = tag => tag && work.has(tag) ? GLM.skinHi : GLM.skin;
+  // tapered limb between two points
+  const cap = (a, c, ra, rb, mat, k) => {
+    if (V.len(V.sub(c, a)) < 0.02) c = V.add(a, [0, 0.02, 0]);
+    put([a[0], a[1], a[2], 0, c[0], c[1], c[2], ra, 0, 0, 0, rb, k, mat, 0, 0], [[a, ra], [c, rb]]);
+  };
+  // ellipsoid from a centre and three semi-axis vectors
+  const ell = (c, ax, mat, k) => {
+    const r1 = Math.max(V.len(ax[0]), 0.3), e1 = V.norm(ax[0]);
+    let e2 = V.sub(ax[1], V.mul(e1, V.dot(ax[1], e1)));
+    if (V.len(e2) < 1e-3) e2 = Math.abs(e1[1]) < 0.9 ? V.cross(e1, [0, 1, 0]) : V.cross(e1, [1, 0, 0]);
+    e2 = V.norm(e2);
+    const r2 = Math.max(V.len(ax[1]), 0.3), r3 = Math.max(V.len(ax[2]), 0.3);
+    put([c[0], c[1], c[2], 1, e1[0], e1[1], e1[2], r1, e2[0], e2[1], e2[2], r2, k, mat, r3, 0], [[c, Math.max(r1, r2, r3)]]);
+  };
+  const sph = (c, r, mat, k) => ell(c, [[r, 0, 0], [0, r, 0], [0, 0, r]], mat, k);
+  const cyl = (a, c, r, mat, round) => put([a[0], a[1], a[2], 2, c[0], c[1], c[2], r, 0, 0, 0, 0, 0, mat, 0, round || 0.6], [[a, r], [c, r]]);
+  const box = (c, e1, e2, h, mat, round) => put([c[0], c[1], c[2], 3, e1[0], e1[1], e1[2], h[0], e2[0], e2[1], e2[2], h[1], 0, mat, h[2], round || 1], [[c, Math.hypot(h[0], h[1], h[2])]]);
+  const add = (p, ...terms) => terms.reduce((acc, [v, k]) => V.add(acc, V.mul(v, k)), p);
+  const T = (p, a, fw, z) => add(p, [t, a], [f, fw], [S, z || 0]);
+  const tfs = (a, fw, z) => [V.mul(t, a), V.mul(f, fw), V.mul(S, z)];
+  const perp = (v, nrm) => V.sub(v, V.mul(nrm, V.dot(v, nrm)));
+
+  /* torso, shoulders, neck and head */
+  group();
+  const H0 = b.hip;
+  ell(T(H0, 15, 0.2, 0), tfs(11, 6.6, 10.2), skin('core'), 0);
+  ell(T(H0, 29, -0.6, 0), tfs(12.6, 8.2, 12), GLM.skin, 3);
+  [1, -1].forEach(sd => {
+    ell(T(H0, 24.5, -2.2, 8.8 * sd), tfs(11.5, 4.6, 4.4), skin('back'), 2.5);
+    ell(T(H0, 34, -5, 5.8 * sd), tfs(7, 2.8, 5.4), skin('back'), 2);
+    ell(T(H0, 33, 5.4, 5.6 * sd), tfs(5.4, 3.4, 6.4), skin('chest'), 1.6);
+    ell(T(b.neck, -1.8, -2, 5 * sd), tfs(4.8, 3.8, 7), skin('back'), 2.2);
+    ell(T(H0, 17, 2.6, 8.6 * sd), tfs(7, 3.2, 2.6), skin('core'), 1.8);
+    for (let i = 0; i < 3; i++) ell(T(H0, 11.5 + i * 5.1, 5.5, 2.4 * sd), tfs(2.5, 1.6, 2.2), skin('core'), 1.2);
+    const sh = sd > 0 ? b.shN : b.shF, el = sd > 0 ? b.elbN : b.elbF;
+    const u = V.norm(V.sub(el, sh));
+    let v = perp(f, u);
+    if (V.len(v) < 0.2) v = perp(t, u);
+    v = V.norm(v);
+    ell(add(sh, [u, 2.2], [S, sd * 1]), [V.mul(u, 6.4), V.mul(v, 5.2), V.mul(V.cross(u, v), 5.2)], skin('shoulders'), 2);
+  });
+  cap(T(b.neck, -5, 0, 0), V.add(b.neck, V.mul(hd, 7)), 6, 5, GLM.skin, 2.5);
+  const head = V.add(b.neck, V.mul(hd, 14.8));
+  const Hh = (up, fw, z) => add(head, [hd, up], [hf, fw], [S, z || 0]);
+  const hfs = (a, fw, z) => [V.mul(hd, a), V.mul(hf, fw), V.mul(S, z)];
+  ell(Hh(1.2, 0.2), hfs(9.1, 9.4, 7.7), GLM.skin, 1.5);
+  ell(Hh(-1.4, 4.6), hfs(7, 5.5, 6.6), GLM.skin, 1.5);
+  ell(Hh(-4.7, 3.1), hfs(5.3, 5.9, 5.9), GLM.skin, 1.5);
+  ell(Hh(-0.6, 9.5), hfs(2.6, 1.7, 1.3), GLM.skin, 0.8);
+  ell(Hh(2, 8.1), hfs(1.4, 1.6, 5.5), GLM.skin, 1);
+  [1, -1].forEach(sd => {
+    ell(Hh(-0.4, -0.6, 7.7 * sd), hfs(2.8, 1.8, 1), GLM.skin, 0.6);
+    sph(Hh(0.6, 8.8, 3 * sd), 1.6, GLM.cut, 1);
+  });
+  ell(Hh(3.7, -1.5), hfs(7.5, 9.5, 8.3), GLM.hair, 0.4);
+  // shorts over the waist and hips
+  ell(T(H0, 2, 0.3, 0), tfs(9.6, 8.2, 12.6), GLM.shorts, 0.5);
+  [1, -1].forEach(sd => ell(T(H0, -0.5, -4.4, 5.4 * sd), tfs(7.6, 5.6, 6.6), work.has('glutes') ? GLM.shortsHi : GLM.shorts, 1.5));
+
+  /* arms */
+  const hands = {};
+  [['N', b.shN, b.elbN, b.wrN], ['F', b.shF, b.elbF, b.wrF]].forEach(([k, sh, el, wr]) => {
+    group();
+    const u = V.norm(V.sub(el, sh)), fo = V.norm(V.sub(wr, el));
+    let v = perp(fo, u);
+    if (V.len(v) < 0.2) v = perp(f, u);
+    if (V.len(v) < 0.2) v = perp(t, u);
+    v = V.norm(v);
+    const w = V.cross(u, v);
+    const ax = (a, b2, c) => [V.mul(u, a), V.mul(v, b2), V.mul(w, c)];
+    cap(sh, el, 4, 3, GLM.skin, 0);
+    ell(add(V.lerp(sh, el, 0.55), [v, 1.8]), ax(7.2, 3.6, 3.4), skin('arms'), 1.4);
+    ell(add(V.lerp(sh, el, 0.42), [v, -1.7]), ax(8.6, 3.6, 3.9), skin('arms'), 1.4);
+    const fax = (a, b2, c) => [V.mul(fo, a), V.mul(v, b2), V.mul(w, c)];
+    cap(el, wr, 3.1, 2.1, GLM.skin, 1.5);
+    ell(V.lerp(el, wr, 0.27), fax(6.8, 3.2, 3.6), GLM.skin, 1.5);
+    const hand = V.add(wr, V.mul(fo, 3.8));
+    ell(hand, fax(4.1, 1.8, 2.8), GLM.skin, 1.2);
+    hands[k] = hand;
+  });
+
+  /* legs */
+  [[b.hipN, b.kneeN, b.ankleN, b.toeN, 1], [b.hipF, b.kneeF, b.ankleF, b.toeF, -1]].forEach(([hp, kn, an, to, sd]) => {
+    group();
+    const u = V.norm(V.sub(kn, hp)), sdir = V.norm(V.sub(an, kn)), fd = V.norm(V.sub(to, an));
+    let q = V.mul(perp(sdir, u), -1);
+    if (V.len(q) < 0.2) q = perp(fd, u);
+    if (V.len(q) < 0.2) q = perp(f, u);
+    q = V.norm(q);
+    const w = V.cross(u, q), inner = [0, 0, -sd];
+    const ax = (a, b2, c) => [V.mul(u, a), V.mul(q, b2), V.mul(w, c)];
+    const hiT = skin('thighs');
+    cap(hp, kn, 7.6, 4.8, GLM.skin, 0);
+    ell(add(V.lerp(hp, kn, 0.5), [q, 2.4]), ax(12.5, 5.6, 6.2), hiT, 2);
+    ell(add(V.lerp(hp, kn, 0.5), [q, -2.5]), ax(11.5, 5.2, 5.8), hiT, 2);
+    ell(add(V.lerp(hp, kn, 0.8), [q, 1.4], [inner, 2.2]), [V.mul(u, 4.6), V.mul(q, 3.2), [0, 0, 3.4]], hiT, 1.4);
+    ell(add(kn, [q, 2.4]), ax(2.8, 1.8, 2.8), GLM.skin, 1.2);
+    let fr = perp(fd, sdir);
+    fr = V.len(fr) < 0.2 ? q : V.norm(fr);
+    const w2 = V.cross(sdir, fr);
+    cap(kn, an, 4, 2.5, GLM.skin, 1.5);
+    ell(add(V.lerp(kn, an, 0.32), [fr, -1.8]), [V.mul(sdir, 9), V.mul(fr, 4.3), V.mul(w2, 4.9)], GLM.skin, 1.6);
+    cap(V.add(hp, V.mul(u, -1)), V.lerp(hp, kn, 0.44), 8.6, 7.9, GLM.shorts, 0.5);
+    const heel = add(an, [fd, -3.2], [sdir, -0.4]), toe = add(to, [fd, 1.6]);
+    cap(add(heel, [sdir, 1]), add(toe, [sdir, 0.9]), 3, 2.5, GLM.sole, 0.3);
+    cap(heel, add(toe, [sdir, -0.4]), 3.4, 2.8, GLM.shoe, 0.4);
+  });
+
+  /* equipment */
+  group();
+  const dumbbell = (c, axis) => {
+    const a = axis === 'y' ? [0, 1, 0] : [0, 0, 1];
+    cyl(V.add(c, V.mul(a, -5.5)), V.add(c, V.mul(a, 5.5)), 1.6, GLM.steel, 0.3);
+    cyl(V.add(c, V.mul(a, -9.8)), V.add(c, V.mul(a, -5.2)), 5.4, GLM.iron, 0.9);
+    cyl(V.add(c, V.mul(a, 5.2)), V.add(c, V.mul(a, 9.8)), 5.4, GLM.iron, 0.9);
+  };
+  const hN = hands.N, hF = hands.F;
+  (ex.props || []).forEach(pr => {
+    if (pr === 'db') { dumbbell(hN); if (!b.oneSided) dumbbell(hF); }
+    else if (pr === 'goblet') dumbbell([(hN[0] + hF[0]) / 2, (hN[1] + hF[1]) / 2 - 2, 0], 'y');
+    else if (pr === 'hipdb') dumbbell([b.hip[0], b.hip[1] - 11, 0]);
+    else if (pr === 'trapbar') {
+      const y = hN[1], x = hN[0], hz = Math.abs(hN[2]);
+      [1, -1].forEach(sg => {
+        cyl([x - 9, y, sg * hz], [x + 9, y, sg * hz], 1.7, GLM.steel, 0.3);
+        cyl([x, y + 1, sg * (hz + 1)], [x, y + 1, sg * 41], 2, GLM.steel, 0.3);
+        cyl([x, y + 1, sg * 29], [x, y + 1, sg * 35], 15, GLM.iron, 1.2);
+      });
+      cyl([x - 9, y, hz], [x - 9, y, -hz], 1.6, GLM.steel, 0.3);
+      cyl([x + 9, y, hz], [x + 9, y, -hz], 1.6, GLM.steel, 0.3);
+    } else if (pr === 'wheel') {
+      const c = [hN[0], hN[1] + 4, 0];
+      cyl(V.add(c, [0, 0, -3]), V.add(c, [0, 0, 3]), 8.5, GLM.iron, 1.5);
+      cyl(hN, hF, 1.4, GLM.steel, 0.3);
+    } else if (pr === 'ball') {
+      sph([(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0], 13.5, GLM.ball, 0);
+    } else if (pr === 'band') cap(hN, hF, 0.8, 0.8, GLM.band, 0);
+  });
+  // benches and frames
+  (ex.scene3 || []).forEach(o => {
+    if (o.t === 'rod') cyl(o.a, o.b, o.r || 1.7, GLM.steel, 0.4);
+    else {
+      const a = (o.rot || 0) * rad;
+      box(o.c, [Math.cos(a), Math.sin(a), 0], [-Math.sin(a), Math.cos(a), 0], o.s.map(v => v / 2), GLM.pad, 1.6);
+    }
+  });
+
+  // a bounding sphere per group lets the GPU skip groups far from each ray
+  const bounds = [], all = [];
+  groups.forEach(gr => {
+    if (!gr.count) return;
+    let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+    gr.pts.forEach(([p, r]) => { for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], p[i] - r); hi[i] = Math.max(hi[i], p[i] + r); } });
+    const c = V.mul(V.add(lo, hi), 0.5);
+    let r = 0;
+    gr.pts.forEach(([p, pr]) => { r = Math.max(r, V.len(V.sub(p, c)) + pr); });
+    bounds.push({ c, r: r + 2, start: gr.start, count: gr.count });
+    all.push([c, r + 2]);
+  });
+  let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  all.forEach(([c, r]) => { for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], c[i] - r); hi[i] = Math.max(hi[i], c[i] + r); } });
+  const bc = V.mul(V.add(lo, hi), 0.5);
+  let br = 0;
+  all.forEach(([c, r]) => { br = Math.max(br, V.len(V.sub(c, bc)) + r); });
+  return { data, groups: bounds, bound: [bc[0], bc[1], bc[2], br] };
+}
+
+const GL_VS = `#version 300 es
+in vec2 aP;
+void main() { gl_Position = vec4(aP, 0.0, 1.0); }`;
+
+const GL_FS = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uData;
+uniform int uNG;
+uniform vec4 uGB[8];
+uniform ivec2 uGR[8];
+uniform vec4 uBound;
+uniform vec3 uCam, uR, uD, uV, uL;
+uniform vec2 uRes, uCtr;
+uniform float uScale, uF, uFloor;
+uniform vec3 uFC;
+out vec4 outColor;
+
+// albedo (sRGB) and specular strength per material
+const vec4 MATS[12] = vec4[12](
+  vec4(0.80, 0.58, 0.45, 0.22), vec4(0.86, 0.44, 0.36, 0.22), vec4(0.19, 0.21, 0.23, 0.05),
+  vec4(0.16, 0.11, 0.08, 0.10), vec4(0.92, 0.92, 0.91, 0.12), vec4(0.30, 0.32, 0.34, 0.05),
+  vec4(0.20, 0.21, 0.23, 0.55), vec4(0.46, 0.53, 0.62, 0.30), vec4(0.70, 0.28, 0.24, 0.15),
+  vec4(0.15, 0.16, 0.18, 0.12), vec4(0.72, 0.74, 0.76, 0.80), vec4(0.28, 0.19, 0.19, 0.05));
+
+vec4 fetchP(int i) { return texelFetch(uData, ivec2(i, 0), 0); }
+
+float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
+  vec3 ba = b - a; float l2 = dot(ba, ba); float rr = r1 - r2; float a2 = l2 - rr * rr; float il2 = 1.0 / l2;
+  vec3 pa = p - a; float y = dot(pa, ba); float z = y - l2;
+  vec3 xv = pa * l2 - ba * y; float x2 = dot(xv, xv);
+  float y2 = y * y * l2; float z2 = z * z * l2;
+  float k = sign(rr) * rr * rr * x2;
+  if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - r2;
+  if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - r1;
+  return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+}
+float sdCyl(vec3 p, vec3 a, vec3 b, float r) {
+  vec3 ba = b - a; vec3 pa = p - a; float baba = dot(ba, ba); float paba = dot(pa, ba);
+  float x = length(pa * baba - ba * paba) - r * baba; float y = abs(paba - baba * 0.5) - baba * 0.5;
+  float x2 = x * x; float y2 = y * y * baba;
+  float d = (max(x, y) < 0.0) ? -min(x2, y2) : (((x > 0.0) ? x2 : 0.0) + ((y > 0.0) ? y2 : 0.0));
+  return sign(d) * sqrt(abs(d)) / baba;
+}
+float prim(int i, vec3 p, out float k, out float m) {
+  vec4 t0 = fetchP(i * 4), t1 = fetchP(i * 4 + 1), t2 = fetchP(i * 4 + 2), t3 = fetchP(i * 4 + 3);
+  k = t3.x; m = t3.y;
+  int ty = int(t0.w + 0.5);
+  if (ty == 0) return sdRoundCone(p, t0.xyz, t1.xyz, t1.w, t2.w);
+  vec3 d = p - t0.xyz;
+  if (ty == 1) {
+    vec3 e3 = cross(t1.xyz, t2.xyz);
+    vec3 q = vec3(dot(d, t1.xyz), dot(d, t2.xyz), dot(d, e3));
+    vec3 r = vec3(t1.w, t2.w, t3.z);
+    float k0 = length(q / r); float k1 = max(length(q / (r * r)), 1e-4);
+    return k0 * (k0 - 1.0) / k1;
+  }
+  if (ty == 2) return sdCyl(p, t0.xyz, t1.xyz, t1.w - t3.w) - t3.w;
+  vec3 e3 = cross(t1.xyz, t2.xyz);
+  vec3 q = abs(vec3(dot(d, t1.xyz), dot(d, t2.xyz), dot(d, e3))) - vec3(t1.w, t2.w, t3.z) + t3.w;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - t3.w;
+}
+float map(vec3 p, out vec4 col) {
+  float best = 1e5; col = MATS[0];
+  for (int g = 0; g < 8; g++) {
+    if (g >= uNG) break;
+    vec4 gb = uGB[g];
+    if (length(p - gb.xyz) - gb.w > best) continue;
+    float d = 1e5; vec4 c = MATS[0];
+    int s = uGR[g].x, n = uGR[g].y;
+    for (int i = 0; i < 64; i++) {
+      if (i >= n) break;
+      float k, m; float di = prim(s + i, p, k, m);
+      if (m < -0.5) { float h = clamp(0.5 - 0.5 * (d + di) / k, 0.0, 1.0); d = mix(d, -di, h) + k * h * (1.0 - h); continue; }
+      vec4 mc = MATS[int(m + 0.5)];
+      if (k > 0.0) { float h = clamp(0.5 + 0.5 * (di - d) / k, 0.0, 1.0); d = mix(di, d, h) - k * h * (1.0 - h); c = mix(mc, c, h); }
+      else if (di < d) { d = di; c = mc; }
+    }
+    if (d < best) { best = d; col = c; }
+  }
+  return best;
+}
+float mapD(vec3 p) { vec4 c; return map(p, c); }
+vec3 calcNormal(vec3 p) {
+  const vec2 e = vec2(1.0, -1.0) * 0.08;
+  return normalize(e.xyy * mapD(p + e.xyy) + e.yyx * mapD(p + e.yyx) + e.yxy * mapD(p + e.yxy) + e.xxx * mapD(p + e.xxx));
+}
+vec2 hitSphere(vec3 ro, vec3 rd, vec4 s) {
+  vec3 oc = ro - s.xyz; float b = dot(oc, rd); float c = dot(oc, oc) - s.w * s.w; float h = b * b - c;
+  if (h < 0.0) return vec2(-1.0);
+  h = sqrt(h); return vec2(-b - h, -b + h);
+}
+float softShadow(vec3 ro, vec3 rd) {
+  vec2 bs = hitSphere(ro, rd, uBound);
+  if (bs.y < 0.0) return 1.0;
+  float res = 1.0, t = max(bs.x, 0.3);
+  for (int i = 0; i < 28; i++) {
+    float h = mapD(ro + rd * t);
+    res = min(res, 9.0 * h / t);
+    t += clamp(h, 0.6, 12.0);
+    if (res < 0.02 || t > bs.y) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+float calcAO(vec3 p, vec3 n) {
+  float occ = 0.0, sca = 1.0;
+  for (int i = 0; i < 5; i++) {
+    float h = 0.5 + 2.2 * float(i);
+    occ += (h - mapD(p + n * h)) * sca; sca *= 0.75;
+  }
+  return clamp(1.0 - 0.09 * occ, 0.0, 1.0);
+}
+vec3 wall(float y) {
+  float v = y / uRes.y;
+  return mix(vec3(0.91, 0.92, 0.915), vec3(0.80, 0.83, 0.81), smoothstep(0.0, 0.9, v));
+}
+void main() {
+  vec2 px = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+  vec3 rd = normalize(uR * (px.x - uCtr.x) / uScale + uD * (px.y - uCtr.y) / uScale - uV * uF);
+  vec3 ro = uCam;
+  vec3 col = wall(px.y);
+  float tFloor = rd.y > 0.0 ? (uFloor - ro.y) / rd.y : 1e9;
+  float tHit = -1.0; vec4 mat;
+  vec2 bs = hitSphere(ro, rd, uBound);
+  if (bs.y > 0.0) {
+    float t = max(bs.x, 0.0);
+    for (int i = 0; i < 96; i++) {
+      float d = map(ro + rd * t, mat);
+      if (d < 0.03) { tHit = t; break; }
+      t += d;
+      if (t > bs.y || t > tFloor) break;
+    }
+  }
+  if (tHit > 0.0) {
+    vec3 p = ro + rd * tHit;
+    map(p, mat);
+    vec3 n = calcNormal(p);
+    float occ = calcAO(p, n);
+    float ndl = dot(n, uL);
+    float sh = ndl > -0.3 ? softShadow(p + n * 0.25, uL) : 0.0;
+    float key = clamp(ndl, 0.0, 1.0) * sh;
+    float wrap = clamp((ndl + 0.45) / 1.45, 0.0, 1.0) * mix(0.35, 1.0, sh);
+    vec3 alb = mat.rgb * mat.rgb;
+    vec3 hv = normalize(uL - rd);
+    float fre = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 5.0);
+    float spe = pow(clamp(dot(n, hv), 0.0, 1.0), 28.0) * sh * mat.a * (0.4 + fre);
+    float sky = (0.6 + 0.4 * clamp(-n.y, -1.0, 1.0)) * occ;
+    float bounce = clamp(n.y, 0.0, 1.0) * occ;
+    float rim = pow(clamp(1.0 + dot(n, rd), 0.0, 1.0), 3.0) * occ;
+    vec3 lin = vec3(1.0, 0.96, 0.9) * 1.55 * mix(key, wrap, 0.3);
+    lin += vec3(0.95, 0.35, 0.22) * (wrap - key) * 0.45 * step(0.3, mat.r - mat.b);
+    lin += vec3(0.62, 0.68, 0.75) * 0.42 * sky;
+    lin += vec3(0.55, 0.5, 0.45) * 0.18 * bounce;
+    lin += vec3(0.8, 0.85, 0.9) * 0.25 * rim;
+    vec3 c = alb * lin + vec3(1.0, 0.97, 0.92) * spe;
+    c = c / (1.0 + 0.15 * c);
+    col = sqrt(c);
+  } else if (tFloor < 1e8) {
+    vec3 p = ro + rd * tFloor;
+    vec3 fl = mix(vec3(0.76, 0.79, 0.77), col, smoothstep(140.0, 520.0, length(p.xz - uFC.xz)));
+    float sh = softShadow(p + vec3(0.0, -0.2, 0.0), uL);
+    float occ = 1.0;
+    if (length(p - uBound.xyz) < uBound.w + 14.0) occ = clamp(0.35 + 0.65 * mapD(p + vec3(0.0, -3.0, 0.0)) / 9.0, 0.35, 1.0);
+    col = fl * mix(0.6, 1.0, sh) * mix(0.75, 1.0, occ);
+  }
+  vec2 q = px / uRes - 0.5;
+  col *= 1.0 - 0.35 * dot(q, q);
+  outColor = vec4(col, 1.0);
+}`;
+
+function makeGL(cv) {
+  let gl;
+  try { gl = cv.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance' }); } catch (e) { gl = null; }
+  if (!gl) return null;
+  const compile = (type, src) => {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.warn(gl.getShaderInfoLog(s)); return null; }
+    return s;
+  };
+  const vs = compile(gl.VERTEX_SHADER, GL_VS), fs = compile(gl.FRAGMENT_SHADER, GL_FS);
+  if (!vs || !fs) return null;
+  const pr = gl.createProgram();
+  gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr);
+  if (!gl.getProgramParameter(pr, gl.LINK_STATUS)) { console.warn(gl.getProgramInfoLog(pr)); return null; }
+  gl.useProgram(pr);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aP = gl.getAttribLocation(pr, 'aP');
+  gl.enableVertexAttribArray(aP); gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0);
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, GL_MAXP * 4, 1, 0, gl.RGBA, gl.FLOAT, null);
+  const U = {};
+  ['uData', 'uNG', 'uGB', 'uGR', 'uBound', 'uCam', 'uR', 'uD', 'uV', 'uL', 'uRes', 'uCtr', 'uScale', 'uF', 'uFloor', 'uFC']
+    .forEach(k => { U[k] = gl.getUniformLocation(pr, k); });
+  gl.uniform1i(U.uData, 0);
+  return { gl, U, tex };
+}
+
+function renderGL(R, W, H, scale, ex, st) {
+  const { gl, U, tex } = R;
+  const fit = fitFor(ex), spec = lerpSpec(normSpec(ex.start), normSpec(ex.end), st.p);
+  const sc = buildPrims(ex, spec);
+  const ya = st.yaw * Math.PI / 180, pa = st.pitch * Math.PI / 180;
+  const cy = Math.cos(ya), sy = Math.sin(ya), cp = Math.cos(pa), sp = Math.sin(pa);
+  const s = Math.min(H * 0.78 / fit.h, W * 0.8 / Math.max(fit.w, 90)), F = 700;
+  const Rv = [cy, 0, -sy], Dv = [sy * sp, cp, cy * sp], Vv = [sy * cp, -sp, cy * cp];
+  const ctr = [fit.cx, fit.cy, 0];
+  gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GL_MAXP * 4, 1, gl.RGBA, gl.FLOAT, sc.data);
+  const gb = new Float32Array(32), gr = new Int32Array(16);
+  sc.groups.slice(0, 8).forEach((g, i) => { gb.set([g.c[0], g.c[1], g.c[2], g.r], i * 4); gr.set([g.start, g.count], i * 2); });
+  gl.uniform1i(U.uNG, Math.min(sc.groups.length, 8));
+  gl.uniform4fv(U.uGB, gb); gl.uniform2iv(U.uGR, gr);
+  gl.uniform4fv(U.uBound, sc.bound);
+  gl.uniform3fv(U.uCam, V.add(ctr, V.mul(Vv, F)));
+  gl.uniform3fv(U.uR, Rv); gl.uniform3fv(U.uD, Dv); gl.uniform3fv(U.uV, Vv);
+  // key light stays upper-left-front of the viewer, like a studio light
+  gl.uniform3fv(U.uL, V.norm(V.add(V.add(V.mul(Rv, -0.5), V.mul(Dv, -0.78)), V.mul(Vv, 0.5))));
+  gl.uniform2f(U.uRes, gl.drawingBufferWidth, gl.drawingBufferHeight);
+  gl.uniform2f(U.uCtr, W / 2 * scale, H * 0.49 * scale);
+  gl.uniform1f(U.uScale, s * scale); gl.uniform1f(U.uF, F); gl.uniform1f(U.uFloor, FLOOR);
+  gl.uniform3fv(U.uFC, ctr);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
 
 
@@ -1041,6 +1401,8 @@ function stopDemo() {
   if (!anim) return;
   cancelAnimationFrame(anim.raf);
   window.removeEventListener('resize', anim.onResize);
+  // free the GPU context now; the page re-renders often and browsers cap live contexts
+  if (anim.R) { const lose = anim.R.gl.getExtension('WEBGL_lose_context'); if (lose) lose.loseContext(); }
   anim = null;
 }
 function mountDemo() {
@@ -1048,38 +1410,54 @@ function mountDemo() {
   const box = document.querySelector('.demo[data-ex]');
   if (!box) return;
   const ex = EXERCISES[box.dataset.ex];
-  const cv = box.querySelector('canvas'), btn = box.querySelector('.demo-btn');
-  const ctx = cv.getContext && cv.getContext('2d');
-  if (!ctx) return;
+  let cv = box.querySelector('canvas');
+  const btn = box.querySelector('.demo-btn');
   const ease = x => x < .5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
-  const mk = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d')]; };
-  const [coach, cctx] = mk(), [hi, hctx] = mk(), [c4, x4] = mk(), [c8, x8] = mk(), [t4, y4] = mk(), [t8, y8] = mk();
-  const st = { raf: 0, playing: !reduceMotion, atEnd: false, t0: performance.now(), last: 0, now: performance.now(), loopT: 0, p: 0, pop: null,
-    yaw: ex.yaw || 35, pitch: 12, W: 0, H: 0, tail: null, layers: { coach, cctx, hi, hctx, g4: { c: c4, x: x4, t: { c: t4, x: y4 } }, g8: { c: c8, x: x8, t: { c: t8, x: y8 } } } };
+  const st = { raf: 0, playing: !reduceMotion, atEnd: false, t0: performance.now(), p: 0, yaw: ex.yaw || 35, pitch: 12, W: 0, H: 0, q: 0.8, slow: 0, last: 0 };
   anim = st;
-  const draw = dt => { if (st.W) renderFrame(ctx, st.W, st.H, ex, st, st.now, dt || 0); };
+  // GPU renderer when available; a canvas that failed WebGL setup is swapped
+  // for a fresh one so the 2D fallback can still draw
+  const R = makeGL(cv);
+  st.R = R;
+  let ctx = null;
+  if (!R) {
+    if (cv.getContext('2d') === null) { const fresh = cv.cloneNode(false); cv.replaceWith(fresh); cv = fresh; }
+    ctx = cv.getContext('2d');
+    if (!ctx) return;
+    const mk = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d')]; };
+    const [coach, cctx] = mk(), [hi, hctx] = mk(), [c4, x4] = mk(), [c8, x8] = mk(), [t4, y4] = mk(), [t8, y8] = mk();
+    st.layers = { coach, cctx, hi, hctx, g4: { c: c4, x: x4, t: { c: t4, x: y4 } }, g8: { c: c8, x: x8, t: { c: t8, x: y8 } } };
+  }
+  const draw = () => {
+    if (!st.W) return;
+    if (R) renderGL(R, st.W, st.H, cv.width / st.W, ex, st); else renderFrame(ctx, st.W, st.H, ex, st);
+  };
   const size = () => {
     const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
     st.W = r.width; st.H = r.height;
-    [[cv, ctx], [coach, cctx], [hi, hctx]].forEach(([c, x]) => {
+    if (R) { cv.width = Math.max(1, Math.round(r.width * dpr * st.q)); cv.height = Math.max(1, Math.round(r.height * dpr * st.q)); return; }
+    const L = st.layers;
+    [[cv, ctx], [L.coach, L.cctx], [L.hi, L.hctx]].forEach(([c, x]) => {
       c.width = Math.round(r.width * dpr); c.height = Math.round(r.height * dpr);
       x.setTransform(dpr, 0, 0, dpr, 0, 0);
     });
-    c4.width = Math.max(1, Math.round(r.width / 4)); c4.height = Math.max(1, Math.round(r.height / 4));
-    c8.width = Math.max(1, Math.round(r.width / 8)); c8.height = Math.max(1, Math.round(r.height / 8));
+    L.g4.c.width = Math.max(1, Math.round(r.width / 4)); L.g4.c.height = Math.max(1, Math.round(r.height / 4));
+    L.g8.c.width = Math.max(1, Math.round(r.width / 8)); L.g8.c.height = Math.max(1, Math.round(r.height / 8));
   };
   st.onResize = () => { size(); draw(); };
   window.addEventListener('resize', st.onResize);
   const REP = 3800;
   const loop = ts => {
     if (!st.playing || anim !== st) return;
-    const dt = st.last ? ts - st.last : 16;
-    st.last = ts; st.now = ts;
-    const el = ts - st.t0, t = (el % REP) / REP;
-    st.loopT = t;
+    const t = ((ts - st.t0) % REP) / REP;
     st.p = t < .1 ? 0 : t < .48 ? ease((t - .1) / .38) : t < .6 ? 1 : 1 - ease((t - .6) / .4);
-    st.pop = t >= .46 && t < .8 ? { k: (t - .46) / .34, n: Math.floor(el / REP) } : null;
-    draw(dt); st.raf = requestAnimationFrame(loop);
+    // on a slow GPU, render fewer pixels rather than drop frames
+    if (R && st.last) {
+      st.slow = ts - st.last > 26 ? st.slow + 1 : Math.max(0, st.slow - 1);
+      if (st.slow > 20 && st.q > 0.42) { st.q *= 0.85; st.slow = 0; size(); }
+    }
+    st.last = ts;
+    draw(); st.raf = requestAnimationFrame(loop);
   };
   const setBtn = () => { btn.textContent = reduceMotion ? (st.atEnd ? 'Show start' : 'Show finish') : (st.playing ? 'Pause' : 'Play'); };
   size(); draw(); setBtn();
@@ -1144,7 +1522,7 @@ function renderToday() {
       h += '<div class="row-body">'
         + '<div class="demo" data-ex="' + id + '"><canvas role="img" aria-label="3D demo of ' + esc(ex.name) + '. Drag sideways to turn it."></canvas>'
         + '<span class="demo-hint" aria-hidden="true">Drag to turn</span><button type="button" class="demo-btn"></button></div>'
-        + '<p class="equip"><span class="swatch" aria-hidden="true"></span>Glowing gold shows the main muscles: ' + esc(ex.muscles.toLowerCase()) + '. You\u2019ll need: ' + esc(ex.equip.toLowerCase()) + (ex.side ? '. Do each side.' : '.') + '</p>'
+        + '<p class="equip"><span class="swatch" aria-hidden="true"></span>Red tint shows the main muscles: ' + esc(ex.muscles.toLowerCase()) + '. You\u2019ll need: ' + esc(ex.equip.toLowerCase()) + (ex.side ? '. Do each side.' : '.') + '</p>'
         + '<ul class="cues">' + ex.cues.map(c => '<li>' + esc(c) + '</li>').join('') + '</ul>'
         + '<a class="vid" href="https://www.youtube.com/results?search_query=' + encodeURIComponent(ex.name + ' proper form') + '" target="_blank" rel="noopener">Watch a full video demo</a>'
         + '<div class="sets' + (ex.bw ? ' bw' : '') + '">'
