@@ -1,0 +1,788 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exercise diagram renderer</title>
+<!--
+  Renders the exercise diagrams used by ../index.html (start and finish
+  position side by side, worked muscles in red) from the 3D body model below.
+  Open this page in a browser with WebGL2 to preview every diagram, or run
+  `node tools/render-diagrams.js` to write them to img/<exercise>.png.
+-->
+<style>
+  body { margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: #f4f5f6; color: #222; }
+  #gl { display: none; }
+  figure { margin: 0 0 16px; }
+  figure img { width: min(100%, 720px); display: block; background: #fff; border: 1px solid #ddd; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="list"></div>
+<script>
+/* ---------- Body model ----------
+   World units match a side view: x forward, y down, z sideways (toward camera = +z).
+   Each pose places the hip, feet and hands; knees and elbows are solved in 3D.
+*/
+const BODY = { torso: 44, head: 17, thigh: 28, shin: 28, upper: 24, fore: 22, hipW: 8, shW: 14 };
+const V = {
+  add: (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  sub: (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  mul: (a, k) => [a[0] * k, a[1] * k, a[2] * k],
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  len: a => Math.hypot(a[0], a[1], a[2]),
+  cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  norm: a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+  lerp: (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+};
+const dirDeg = a => [Math.sin(a * Math.PI / 180), -Math.cos(a * Math.PI / 180), 0];
+
+function ik3(root, target, l1, l2, pole) {
+  const d = V.sub(target, root), dist = V.len(d) || 0.001;
+  const dd = Math.min(Math.max(dist, Math.abs(l1 - l2) + 0.4), l1 + l2 - 0.05);
+  const u = V.mul(d, 1 / dist);
+  const along = (l1 * l1 - l2 * l2 + dd * dd) / (2 * dd);
+  const h = Math.sqrt(Math.max(l1 * l1 - along * along, 0));
+  let p = V.sub(pole, V.mul(u, V.dot(pole, u)));
+  if (V.len(p) < 1e-4) p = Math.abs(u[1]) < 0.9 ? V.cross(u, [0, 1, 0]) : V.cross(u, [1, 0, 0]);
+  p = V.norm(p);
+  return { mid: V.add(V.add(root, V.mul(u, along)), V.mul(p, h)), end: V.add(root, V.mul(u, dd)) };
+}
+
+/* Normalise a pose so two poses can be blended number by number */
+function normSpec(s) {
+  const o = Object.assign({}, s);
+  if (o.neck) { o.T = Math.atan2(o.neck[0] - o.hip[0], -(o.neck[1] - o.hip[1])) * 180 / Math.PI; delete o.neck; }
+  if (o.H === undefined) o.H = o.T;
+  return o;
+}
+function lerpSpec(a, b, t) {
+  const o = {};
+  for (const k of Object.keys(a)) {
+    const x = a[k], y = b[k];
+    if (typeof x === 'number' && typeof y === 'number') o[k] = x + (y - x) * t;
+    else if (Array.isArray(x) && Array.isArray(y) && typeof x[0] === 'number') o[k] = x.map((v, i) => v + (y[i] - v) * t);
+    else o[k] = x;
+  }
+  return o;
+}
+
+function solveBody(s, face) {
+  if (s.foreA !== undefined && s.elbow) {
+    const d = dirDeg(s.foreA);
+    s = Object.assign({}, s, { hand: [s.elbow[0] + d[0] * BODY.fore, s.elbow[1] + d[1] * BODY.fore] });
+  }
+  const hip = [s.hip[0], s.hip[1], 0];
+  const neck = V.add(hip, V.mul(dirDeg(s.T), BODY.torso));
+  const head = V.add(neck, V.mul(dirDeg(s.H), BODY.head));
+  const neckTop = V.add(neck, V.mul(dirDeg(s.H), 8));
+  const hw = BODY.hipW, sw = BODY.shW;
+  const hipN = [hip[0], hip[1], hw], hipF = [hip[0], hip[1], -hw];
+  const tdir = dirDeg(s.T);
+  const shBase = V.add(neck, V.mul(tdir, -4));
+  const shN = [shBase[0], shBase[1], sw], shF = [shBase[0], shBase[1], -sw];
+
+  const fz = s.footZ !== undefined ? s.footZ : 9;
+  const kp = s.kp || [1, 0];
+  const legN = s.knee ? { mid: [s.knee[0], s.knee[1], fz], end: [s.foot[0], s.foot[1], fz] }
+    : ik3(hipN, [s.foot[0], s.foot[1], fz], BODY.thigh, BODY.shin, [kp[0], kp[1], 0.15]);
+  let legF;
+  if (s.foot2) {
+    const fz2 = s.foot2Z !== undefined ? s.foot2Z : fz, kp2 = s.kp2 || kp;
+    legF = s.knee2 ? { mid: [s.knee2[0], s.knee2[1], -fz2], end: [s.foot2[0], s.foot2[1], -fz2] }
+      : ik3(hipF, [s.foot2[0], s.foot2[1], -fz2], BODY.thigh, BODY.shin, [kp2[0], kp2[1], -0.15]);
+  } else {
+    legF = s.knee ? { mid: [s.knee[0], s.knee[1], -fz], end: [s.foot[0], s.foot[1], -fz] }
+      : ik3(hipF, [s.foot[0], s.foot[1], -fz], BODY.thigh, BODY.shin, [kp[0], kp[1], -0.15]);
+  }
+  const hz = s.handZ !== undefined ? s.handZ : sw;
+  const ep = s.ep || [-0.3, 1, 0.2];
+  const ez = s.elbowZ !== undefined ? s.elbowZ : sw + 2;
+  const armN = s.elbow ? { mid: [s.elbow[0], s.elbow[1], ez], end: [s.hand[0], s.hand[1], hz] }
+    : ik3(shN, [s.hand[0], s.hand[1], hz], BODY.upper, BODY.fore, [ep[0], ep[1], ep[2] || 0.2]);
+  let armF;
+  if (s.hand2) {
+    const hz2 = s.hand2Z !== undefined ? s.hand2Z : sw, ep2 = s.ep2 || ep;
+    armF = ik3(shF, [s.hand2[0], s.hand2[1], -hz2], BODY.upper, BODY.fore, [ep2[0], ep2[1], -(ep2[2] || 0.2)]);
+  } else {
+    armF = s.elbow ? { mid: [s.elbow[0], s.elbow[1], -ez], end: [s.hand[0], s.hand[1], -hz] }
+      : ik3(shF, [s.hand[0], s.hand[1], -hz], BODY.upper, BODY.fore, [ep[0], ep[1], -(ep[2] || 0.2)]);
+  }
+  const toe = (knee, ankle) => {
+    const sd = V.norm(V.sub(ankle, knee));
+    return V.add(ankle, V.mul(V.norm([sd[1] * face, -sd[0] * face, 0]), 9));
+  };
+  return {
+    hip, neck, head, neckTop, tdir, hipN, hipF, shN, shF,
+    kneeN: legN.mid, ankleN: legN.end, toeN: toe(legN.mid, legN.end),
+    kneeF: legF.mid, ankleF: legF.end, toeF: toe(legF.mid, legF.end),
+    elbN: armN.mid, wrN: armN.end, elbF: armF.mid, wrF: armF.end,
+    oneSided: !!s.hand2
+  };
+}
+
+const FLOOR = 155;
+
+/* ---------- Equipment ----------
+   Shared by both renderers so the weights sit in exactly the same place.
+   Hand-held weights hang from the centre of the hand; floor equipment rests on
+   the floor. Items: cyl (a, b, r), cap (a, b, ra, rb) and sph (c, r). */
+function equipment(ex, b, hN, hF, fwd) {
+  const out = [];
+  const cyl = (a, c, r, mat, round) => out.push({ t: 'cyl', a, b: c, r, mat, round: round || 0.4 });
+  const cap = (a, c, ra, rb, mat) => out.push({ t: 'cap', a, b: c, ra, rb, mat });
+  const sph = (c, r, mat) => out.push({ t: 'sph', c, r, mat });
+  // 'grip': handle across the fist, so it turns with the forearm (neutral grip)
+  const gripAxis = (el, wr) => { const fo = V.norm(V.sub(wr, el)); return V.norm([fo[1], -fo[0], 0.0001]); };
+  const dumbbell = (c, axis) => {
+    const a = Array.isArray(axis) ? axis : axis === 'y' ? [0, 1, 0] : axis === 'x' ? [1, 0, 0] : [0, 0, 1];
+    cyl(V.add(c, V.mul(a, -5.5)), V.add(c, V.mul(a, 5.5)), 1.6, 'steel', 0.3);
+    cyl(V.add(c, V.mul(a, -9.8)), V.add(c, V.mul(a, -5.2)), 5.4, 'iron', 0.9);
+    cyl(V.add(c, V.mul(a, 5.2)), V.add(c, V.mul(a, 9.8)), 5.4, 'iron', 0.9);
+  };
+  (ex.props || []).forEach(pr => {
+    if (pr === 'db') {
+      const g = ex.dbAxis === 'grip';
+      dumbbell(hN, g ? gripAxis(b.elbN, b.wrN) : ex.dbAxis);
+      if (!b.oneSided) dumbbell(hF, g ? gripAxis(b.elbF, b.wrF) : ex.dbAxis);
+    }
+    else if (pr === 'goblet') dumbbell(V.add(V.lerp(hN, hF, 0.5), [0, ex.gobletDY || -2, 0]), 'y');
+    else if (pr === 'hipdb') dumbbell(V.add(V.add(b.hip, V.mul(fwd, ex.hipDbOut || 15)), V.mul(b.tdir, ex.hipDbUp || 2)));
+    else if (pr === 'trapbar') {
+      // hexagon-style frame that surrounds the lifter: handles in the hands,
+      // rails outside the legs, front and back bars clear of shins and hips
+      const x = (hN[0] + hF[0]) / 2, y = (hN[1] + hF[1]) / 2, hz = Math.abs(hN[2]), rz = hz + 5, yb = y + 1;
+      [1, -1].forEach(sg => {
+        cyl([x - 7, y, sg * hz], [x + 7, y, sg * hz], 1.6, 'steel');
+        cyl([x - 7, y, sg * hz], [x - 7, yb, sg * rz], 1.2, 'steel');
+        cyl([x + 7, y, sg * hz], [x + 7, yb, sg * rz], 1.2, 'steel');
+        cyl([x - 26, yb, sg * rz], [x + 26, yb, sg * rz], 1.8, 'steel');
+        cyl([x, yb, sg * rz], [x, yb, sg * 46], 2, 'steel');
+        cyl([x, yb, sg * 31], [x, yb, sg * 37], 15.5, 'iron', 1.2);
+      });
+      cyl([x - 26, yb, rz], [x - 26, yb, -rz], 1.8, 'steel');
+      cyl([x + 26, yb, rz], [x + 26, yb, -rz], 1.8, 'steel');
+    } else if (pr === 'wheel') {
+      // the axle runs through both hands; the wheel sits on the floor
+      const c = [(hN[0] + hF[0]) / 2, FLOOR - 8.5, 0];
+      cyl(V.add(c, [0, 0, -3.2]), V.add(c, [0, 0, 3.2]), 8.5, 'iron', 1.5);
+      cyl(V.add(c, [0, 0, -9]), V.add(c, [0, 0, 9]), 1.4, 'steel', 0.3);
+    } else if (pr === 'ball') {
+      sph([(b.ankleN[0] + b.ankleF[0]) / 2 + 3, FLOOR - 13.5, 0], 13.5, 'ball');
+    } else if (pr === 'band') cap(hN, hF, 0.8, 0.8, 'band');
+  });
+  return out;
+}
+
+const GLM = { skin: 0, skinHi: 1, shorts: 2, hair: 3, shoe: 4, sole: 5, iron: 6, ball: 7, band: 8, pad: 9, steel: 10, shortsHi: 11, cut: -1 };
+const GL_MAXP = 110;
+
+function buildPrims(ex, spec) {
+  const face = ex.face || 1, b = solveBody(spec, face), work = new Set(ex.work || []);
+  const rad = Math.PI / 180, t = b.tdir, S = [0, 0, 1];
+  const f = [Math.cos(spec.T * rad) * face, Math.sin(spec.T * rad) * face, 0];
+  const hd = dirDeg(spec.H), hf = [Math.cos(spec.H * rad) * face, Math.sin(spec.H * rad) * face, 0];
+  const data = new Float32Array(GL_MAXP * 16), groups = [];
+  let n = 0, g = null;
+  const group = () => { g = { start: n, count: 0, pts: [] }; groups.push(g); };
+  const put = (vals, pts) => {
+    if (n >= GL_MAXP) return;
+    data.set(vals, n * 16); n++; g.count++; g.pts.push(...pts);
+  };
+  const skin = tag => tag && work.has(tag) ? GLM.skinHi : GLM.skin;
+  // tapered limb between two points
+  const cap = (a, c, ra, rb, mat, k) => {
+    if (V.len(V.sub(c, a)) < 0.02) c = V.add(a, [0, 0.02, 0]);
+    put([a[0], a[1], a[2], 0, c[0], c[1], c[2], ra, 0, 0, 0, rb, k, mat, 0, 0], [[a, ra], [c, rb]]);
+  };
+  // ellipsoid from a centre and three semi-axis vectors
+  const ell = (c, ax, mat, k) => {
+    const r1 = Math.max(V.len(ax[0]), 0.3), e1 = V.norm(ax[0]);
+    let e2 = V.sub(ax[1], V.mul(e1, V.dot(ax[1], e1)));
+    if (V.len(e2) < 1e-3) e2 = Math.abs(e1[1]) < 0.9 ? V.cross(e1, [0, 1, 0]) : V.cross(e1, [1, 0, 0]);
+    e2 = V.norm(e2);
+    const r2 = Math.max(V.len(ax[1]), 0.3), r3 = Math.max(V.len(ax[2]), 0.3);
+    put([c[0], c[1], c[2], 1, e1[0], e1[1], e1[2], r1, e2[0], e2[1], e2[2], r2, k, mat, r3, 0], [[c, Math.max(r1, r2, r3)]]);
+  };
+  const sph = (c, r, mat, k) => ell(c, [[r, 0, 0], [0, r, 0], [0, 0, r]], mat, k);
+  const cyl = (a, c, r, mat, round) => put([a[0], a[1], a[2], 2, c[0], c[1], c[2], r, 0, 0, 0, 0, 0, mat, 0, round || 0.6], [[a, r], [c, r]]);
+  const box = (c, e1, e2, h, mat, round) => put([c[0], c[1], c[2], 3, e1[0], e1[1], e1[2], h[0], e2[0], e2[1], e2[2], h[1], 0, mat, h[2], round || 1], [[c, Math.hypot(h[0], h[1], h[2])]]);
+  const add = (p, ...terms) => terms.reduce((acc, [v, k]) => V.add(acc, V.mul(v, k)), p);
+  const T = (p, a, fw, z) => add(p, [t, a], [f, fw], [S, z || 0]);
+  const tfs = (a, fw, z) => [V.mul(t, a), V.mul(f, fw), V.mul(S, z)];
+  const perp = (v, nrm) => V.sub(v, V.mul(nrm, V.dot(v, nrm)));
+
+  /* torso, shoulders, neck and head */
+  group();
+  const H0 = b.hip;
+  ell(T(H0, 15, 0.2, 0), tfs(11, 6.6, 10.2), skin('core'), 0);
+  ell(T(H0, 29, -0.6, 0), tfs(12.6, 8.2, 12), GLM.skin, 3);
+  [1, -1].forEach(sd => {
+    ell(T(H0, 24.5, -2.2, 8.8 * sd), tfs(11.5, 4.6, 4.4), skin('lats'), 2.5);
+    ell(T(H0, 34, -5, 5.8 * sd), tfs(7, 2.8, 5.4), skin('upperback'), 2);
+    ell(T(H0, 33, 5.4, 5.6 * sd), tfs(5.4, 3.4, 6.4), skin('chest'), 1.6);
+    ell(T(b.neck, -1.8, -2, 5 * sd), tfs(4.8, 3.8, 7), skin('traps'), 2.2);
+    ell(T(H0, 17, 2.6, 8.6 * sd), tfs(7, 3.2, 2.6), skin('core'), 1.8);
+    for (let i = 0; i < 3; i++) ell(T(H0, 11.5 + i * 5.1, 5.5, 2.4 * sd), tfs(2.5, 1.6, 2.2), skin('core'), 1.2);
+    const sh = sd > 0 ? b.shN : b.shF, el = sd > 0 ? b.elbN : b.elbF;
+    const u = V.norm(V.sub(el, sh));
+    let v = perp(f, u);
+    if (V.len(v) < 0.2) v = perp(t, u);
+    v = V.norm(v);
+    ell(add(sh, [u, 2.2], [S, sd * 1]), [V.mul(u, 6.4), V.mul(v, 5.2), V.mul(V.cross(u, v), 5.2)], skin('shoulders'), 2);
+  });
+  cap(T(b.neck, -5, 0, 0), V.add(b.neck, V.mul(hd, 7)), 6, 5, GLM.skin, 2.5);
+  const head = V.add(b.neck, V.mul(hd, 14.8));
+  const Hh = (up, fw, z) => add(head, [hd, up], [hf, fw], [S, z || 0]);
+  const hfs = (a, fw, z) => [V.mul(hd, a), V.mul(hf, fw), V.mul(S, z)];
+  ell(Hh(1.2, 0.2), hfs(9.1, 9.4, 7.7), GLM.skin, 1.5);
+  ell(Hh(-1.4, 4.6), hfs(7, 5.5, 6.6), GLM.skin, 1.5);
+  ell(Hh(-4.7, 3.1), hfs(5.3, 5.9, 5.9), GLM.skin, 1.5);
+  ell(Hh(-0.6, 9.5), hfs(2.6, 1.7, 1.3), GLM.skin, 0.8);
+  ell(Hh(2, 8.1), hfs(1.4, 1.6, 5.5), GLM.skin, 1);
+  [1, -1].forEach(sd => {
+    ell(Hh(-0.4, -0.6, 7.7 * sd), hfs(2.8, 1.8, 1), GLM.skin, 0.6);
+  });
+  ell(Hh(3.7, -1.5), hfs(7.5, 9.5, 8.3), GLM.hair, 0.4);
+  // shorts over the waist and hips
+  ell(T(H0, 2, 0.3, 0), tfs(9.6, 8.2, 12.6), GLM.shorts, 0.5);
+  [1, -1].forEach(sd => ell(T(H0, -0.5, -4.4, 5.4 * sd), tfs(7.6, 5.6, 6.6), work.has('glutes') ? GLM.shortsHi : GLM.shorts, 1.5));
+
+  /* arms */
+  const hands = {};
+  [['N', b.shN, b.elbN, b.wrN], ['F', b.shF, b.elbF, b.wrF]].forEach(([k, sh, el, wr]) => {
+    group();
+    const u = V.norm(V.sub(el, sh)), fo = V.norm(V.sub(wr, el));
+    let v = perp(fo, u);
+    if (V.len(v) < 0.2) v = perp(f, u);
+    if (V.len(v) < 0.2) v = perp(t, u);
+    v = V.norm(v);
+    const w = V.cross(u, v);
+    const ax = (a, b2, c) => [V.mul(u, a), V.mul(v, b2), V.mul(w, c)];
+    cap(sh, el, 4, 3, GLM.skin, 0);
+    ell(add(V.lerp(sh, el, 0.55), [v, 1.8]), ax(7.2, 3.6, 3.4), skin('biceps'), 1.4);
+    ell(add(V.lerp(sh, el, 0.42), [v, -1.7]), ax(8.6, 3.6, 3.9), skin('triceps'), 1.4);
+    const fax = (a, b2, c) => [V.mul(fo, a), V.mul(v, b2), V.mul(w, c)];
+    cap(el, wr, 3.1, 2.1, GLM.skin, 1.5);
+    ell(V.lerp(el, wr, 0.27), fax(6.8, 3.2, 3.6), skin('forearms'), 1.5);
+    const hand = V.add(wr, V.mul(fo, 3.8));
+    ell(hand, fax(4.1, 1.8, 2.8), GLM.skin, 1.2);
+    hands[k] = hand;
+  });
+
+  /* legs */
+  [[b.hipN, b.kneeN, b.ankleN, b.toeN, 1], [b.hipF, b.kneeF, b.ankleF, b.toeF, -1]].forEach(([hp, kn, an, to, sd]) => {
+    group();
+    const u = V.norm(V.sub(kn, hp)), sdir = V.norm(V.sub(an, kn)), fd = V.norm(V.sub(to, an));
+    let q = V.mul(perp(sdir, u), -1);
+    if (V.len(q) < 0.2) q = perp(fd, u);
+    if (V.len(q) < 0.2) q = perp(f, u);
+    q = V.norm(q);
+    const w = V.cross(u, q), inner = [0, 0, -sd];
+    const ax = (a, b2, c) => [V.mul(u, a), V.mul(q, b2), V.mul(w, c)];
+    cap(hp, kn, 7.6, 4.8, GLM.skin, 0);
+    ell(add(V.lerp(hp, kn, 0.5), [q, 2.4]), ax(12.5, 5.6, 6.2), skin('quads'), 2);
+    ell(add(V.lerp(hp, kn, 0.5), [q, -2.5]), ax(11.5, 5.2, 5.8), skin('hams'), 2);
+    ell(add(V.lerp(hp, kn, 0.8), [q, 1.4], [inner, 2.2]), [V.mul(u, 4.6), V.mul(q, 3.2), [0, 0, 3.4]], skin('quads'), 1.4);
+    ell(add(kn, [q, 2.4]), ax(2.8, 1.8, 2.8), GLM.skin, 1.2);
+    let fr = perp(fd, sdir);
+    fr = V.len(fr) < 0.2 ? q : V.norm(fr);
+    const w2 = V.cross(sdir, fr);
+    cap(kn, an, 4, 2.5, GLM.skin, 1.5);
+    ell(add(V.lerp(kn, an, 0.32), [fr, -1.8]), [V.mul(sdir, 9), V.mul(fr, 4.3), V.mul(w2, 4.9)], skin('calves'), 1.6);
+    cap(V.add(hp, V.mul(u, -1)), V.lerp(hp, kn, 0.44), 8.6, 7.9, GLM.shorts, 0.5);
+    const heel = add(an, [fd, -3.2], [sdir, -0.4]), toe = add(to, [fd, 1.6]);
+    cap(add(heel, [sdir, 1]), add(toe, [sdir, 0.9]), 3, 2.5, GLM.sole, 0.3);
+    cap(heel, add(toe, [sdir, -0.4]), 3.4, 2.8, GLM.shoe, 0.4);
+  });
+
+  /* equipment */
+  group();
+  const propStart = n;
+  equipment(ex, b, hands.N, hands.F, f).forEach(o => {
+    if (o.t === 'sph') sph(o.c, o.r, GLM[o.mat], 0);
+    else if (o.t === 'cap') cap(o.a, o.b, o.ra, o.rb, GLM[o.mat], 0);
+    else cyl(o.a, o.b, o.r, GLM[o.mat], o.round);
+  });
+  const sceneStart = n;
+  // benches and frames
+  (ex.scene3 || []).forEach(o => {
+    if (o.t === 'rod') cyl(o.a, o.b, o.r || 1.7, GLM.steel, 0.4);
+    else {
+      const a = (o.rot || 0) * rad;
+      box(o.c, [Math.cos(a), Math.sin(a), 0], [-Math.sin(a), Math.cos(a), 0], o.s.map(v => v / 2), GLM.pad, 1.6);
+    }
+  });
+
+  // a bounding sphere per group lets the GPU skip groups far from each ray
+  const bounds = [], all = [];
+  groups.forEach(gr => {
+    if (!gr.count) return;
+    let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+    gr.pts.forEach(([p, r]) => { for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], p[i] - r); hi[i] = Math.max(hi[i], p[i] + r); } });
+    const c = V.mul(V.add(lo, hi), 0.5);
+    let r = 0;
+    gr.pts.forEach(([p, pr]) => { r = Math.max(r, V.len(V.sub(p, c)) + pr); });
+    bounds.push({ c, r: r + 2, start: gr.start, count: gr.count });
+    all.push([c, r + 2]);
+  });
+  let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  all.forEach(([c, r]) => { for (let i = 0; i < 3; i++) { lo[i] = Math.min(lo[i], c[i] - r); hi[i] = Math.max(hi[i], c[i] + r); } });
+  const bc = V.mul(V.add(lo, hi), 0.5);
+  let br = 0;
+  all.forEach(([c, r]) => { br = Math.max(br, V.len(V.sub(c, bc)) + r); });
+  return { data, groups: bounds, bound: [bc[0], bc[1], bc[2], br], n, propStart, sceneStart, hands, pts: groups.flatMap(gr => gr.pts) };
+}
+
+/* ---------- Poses: start and finish of each movement ---------- */
+const legRods = (x, top) => [
+  { t: 'rod', a: [x, top, -9], b: [x, 152, -9] }, { t: 'rod', a: [x, top, 9], b: [x, 152, 9] },
+  { t: 'rod', a: [x, 152, -12], b: [x, 152, 12] }
+];
+const EX3 = {
+  trapbar: {
+    face: 1, yaw: 62, work: ['glutes', 'thighs', 'back'], props: ['trapbar'],
+    start: { hip: [90, 118], T: 50, H: 38, foot: [110, 152], kp: [1, 0], hand: [110, 133], handZ: 20, ep: [-0.3, 1, 0.1] },
+    end: { hip: [110, 96], T: 0, H: 0, foot: [110, 152], kp: [1, 0], hand: [110, 98], handZ: 20, ep: [-0.3, 1, 0.1] }
+  },
+  dbbench: {
+    face: 1, yaw: 35, work: ['chest', 'shoulders', 'arms'], props: ['db'],
+    scene3: [{ t: 'box', c: [82, 128, 0], s: [80, 8, 24] }].concat(legRods(50, 132), legRods(114, 132)),
+    start: { hip: [112, 112.5], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [72, 94.5], handZ: 18, ep: [1, 0.3, 0.6] },
+    end: { hip: [112, 112.5], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [70, 66.5], handZ: 14, ep: [1, 0.3, 0.6] }
+  },
+  row1: {
+    face: -1, yaw: -35, work: ['back', 'arms'], props: ['db'], dbAxis: 'grip',
+    scene3: [{ t: 'box', c: [119, 128, 0], s: [106, 8, 24] }].concat(legRods(78, 132), legRods(160, 132)),
+    start: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 119], foot2: [164, 119], foot2Z: 5,
+             hand: [95, 132], handZ: 15, ep: [-0.5, 1, 0.2], hand2: [88, 118], hand2Z: 6, ep2: [1, 0.3, 0] },
+    end: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 119], foot2: [164, 119], foot2Z: 5,
+           hand: [112, 104], handZ: 15, ep: [0.5, -1, 0.2], hand2: [88, 118], hand2Z: 6, ep2: [1, 0.3, 0] }
+  },
+  pullapart: {
+    face: 1, yaw: 55, work: ['shoulders', 'back'], props: ['band'],
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [152, 62], handZ: 5, ep: [0, 1, 0.4] },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [126, 62], handZ: 54, ep: [0, 1, 0.4] }
+  },
+  wheel: {
+    face: 1, yaw: 30, work: ['core', 'shoulders'], props: ['wheel'],
+    start: { hip: [104, 120], T: 55, H: 50, knee: [104, 148], foot: [76, 148], hand: [148, 143], handZ: 7, ep: [0, 1, 0.3] },
+    end: { hip: [114, 122], T: 72, H: 70, knee: [104, 148], foot: [76, 148], hand: [192, 144], handZ: 7, ep: [0, 1, 0.3] }
+  },
+  goblet: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['goblet'], gobletDY: 6,
+    start: { hip: [110, 96], T: 0, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [124, 64], handZ: 5, ep: [0, 1, 0.5] },
+    end: { hip: [90, 122], T: 25, H: 15, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [126, 90], handZ: 5, ep: [0, 1, 0.5] }
+  },
+  ohp: {
+    face: 1, yaw: 35, work: ['shoulders', 'arms'], props: ['db'],
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [116, 46], handZ: 24, ep: [0.2, 1, 0.5] },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 8], handZ: 16, ep: [0.2, 1, 0.5] }
+  },
+  inclinerow: {
+    face: 1, yaw: 35, work: ['back', 'arms'], props: ['db'], dbAxis: 'grip',
+    scene3: [{ t: 'box', c: [152.2, 105.8, 0], s: [54, 8, 22], rot: -45 },
+             { t: 'rod', a: [152, 109, 0], b: [152, 152, 0], r: 2.2 }, { t: 'rod', a: [112, 152, 0], b: [170, 152, 0], r: 2 },
+             { t: 'rod', a: [112, 152, -12], b: [112, 152, 12], r: 1.8 }, { t: 'rod', a: [170, 152, -12], b: [170, 152, 12], r: 1.8 }],
+    start: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [150, 130], handZ: 17, ep: [-1, 0.2, 0.3] },
+    end: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [130, 112], handZ: 22, ep: [-1, -0.6, 0.5] }
+  },
+  rdl: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['db'],
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [124, 98], handZ: 13, ep: [-0.3, 1, 0.2] },
+    end: { hip: [94, 104], T: 65, H: 50, foot: [110, 152], kp: [1, 0], hand: [130, 128], handZ: 13, ep: [-0.3, 1, 0.2] }
+  },
+  deadbug: {
+    face: 1, yaw: 30, work: ['core'], props: [],
+    start: { hip: [120, 146], T: -90, H: -90, knee: [120, 118], foot: [148, 118], foot2: [146, 119], kp2: [0, -1],
+             hand: [76, 100], ep: [1, 0, 0], hand2: [80, 102], ep2: [1, 0, 0] },
+    end: { hip: [120, 146], T: -90, H: -90, knee: [120, 118], foot: [148, 118], foot2: [176, 143], kp2: [0, -1],
+           hand: [30, 146], ep: [1, 0, 0], hand2: [80, 102], ep2: [1, 0, 0] }
+  },
+  split: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['db'], dbAxis: 'grip',
+    scene3: [{ t: 'box', c: [46, 128, 0], s: [48, 8, 24] }].concat(legRods(30, 132), legRods(62, 132)),
+    start: { hip: [116, 102], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [68, 118], foot2Z: 4, kp2: [0, 1], hand: [120, 106], handZ: 22 },
+    end: { hip: [112, 124], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [68, 118], foot2Z: 4, kp2: [0, 1], hand: [118, 128], handZ: 22 }
+  },
+  pushup: {
+    face: 1, yaw: 35, work: ['chest', 'arms', 'shoulders'], props: [],
+    start: { hip: [106, 123], neck: [146, 104], H: 60, foot: [56, 148], footZ: 6, kp: [0, 1], hand: [150, 150], handZ: 18, ep: [-1, 0.2, 0.3] },
+    end: { hip: [111, 140], neck: [153, 134], H: 78, foot: [56, 148], footZ: 6, kp: [0, 1], hand: [150, 150], handZ: 18, ep: [-1, 0.1, 0.5] }
+  },
+  thrust: {
+    face: 1, yaw: 35, work: ['glutes', 'thighs'], props: ['hipdb'], hipDbOut: 17, hipDbUp: 8,
+    scene3: [{ t: 'box', c: [48, 133, 0], s: [48, 8, 26] }].concat(legRods(34, 137), legRods(62, 137)),
+    start: { hip: [100, 142], neck: [66, 114], H: -50, foot: [140, 152], footZ: 12, kp: [0.5, -0.5], hand: [100, 132], handZ: 12, ep: [0, -1, 0.3] },
+    end: { hip: [112, 116], neck: [68, 116], H: -90, foot: [140, 152], footZ: 12, kp: [0.5, -0.5], hand: [112, 106], handZ: 12, ep: [0, -1, 0.3] }
+  },
+  latraise: {
+    face: 1, yaw: 70, work: ['shoulders'], props: ['db'], dbAxis: 'x',
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 98], handZ: 23, ep: [0, 1, 0.6] },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [113, 62], handZ: 54, ep: [0, -1, 0.4] }
+  },
+  ohtri: {
+    face: 1, yaw: 30, work: ['arms'], props: ['goblet'], gobletDY: 5,
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [110, 32], elbowZ: 12, foreA: 3, handZ: 4 },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [112, 30], elbowZ: 12, foreA: -118, handZ: 4 }
+  },
+  curl: {
+    face: 1, yaw: 30, work: ['arms'], props: ['db'], dbAxis: 'grip',
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [108, 80], elbowZ: 18, foreA: 172, handZ: 23 },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [109, 80], elbowZ: 18, foreA: 45, handZ: 21 }
+  },
+  ballcurl: {
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['ball'],
+    start: { hip: [108, 118], neck: [72, 146], H: -96, foot: [164, 124], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] },
+    end: { hip: [108, 118], neck: [72, 146], H: -96, foot: [128, 126], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] }
+  }
+};
+/* ---------- Which muscles to highlight in each diagram ---------- */
+const WORK = {
+  dbbench: ['chest', 'triceps', 'shoulders'],
+  ohp: ['shoulders', 'triceps'],
+  pushup: ['chest', 'triceps', 'shoulders'],
+  latraise: ['shoulders'],
+  ohtri: ['triceps'],
+  row1: ['lats', 'upperback', 'biceps'],
+  inclinerow: ['upperback', 'lats', 'biceps'],
+  pullapart: ['upperback', 'shoulders'],
+  curl: ['biceps', 'forearms'],
+  wheel: ['core', 'lats'],
+  trapbar: ['glutes', 'quads', 'hams', 'traps'],
+  goblet: ['quads', 'glutes'],
+  split: ['quads', 'glutes'],
+  thrust: ['glutes', 'hams'],
+  ballcurl: ['hams', 'glutes']
+};
+
+// Camera angle per diagram where the animation's angle doesn't read well as a still
+const VIEW = {
+  dbbench: { diagramYaw: 25, diagramPitch: 22 },
+  thrust: { diagramYaw: 18, diagramPitch: 8 },
+  ballcurl: { diagramYaw: 8, diagramPitch: 6 }
+};
+
+/* ---------- Line-art renderer ----------
+   Pass 1 ray-marches each pose with an orthographic camera and stores, per
+   pixel: surface normal, depth, which body part (group) and material it hit,
+   and how much contact shadow falls on the floor.
+   Pass 2 inks a line wherever the silhouette, a body part overlapping another,
+   a fold in the surface or a change of material shows up, then fills flat
+   colours: white skin, light-blue shorts, red for the worked muscles. */
+const VS = `#version 300 es
+in vec2 aP;
+void main() { gl_Position = vec4(aP, 0.0, 1.0); }`;
+
+const FS_GBUF = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uData;
+uniform int uNG;
+uniform vec4 uGB[8];
+uniform ivec2 uGR[8];
+uniform vec4 uBound;
+uniform vec3 uC, uR, uD, uV;
+uniform vec2 uOrigin, uPanel;
+uniform float uScale, uFloor;
+layout(location = 0) out vec4 o0;
+layout(location = 1) out vec4 o1;
+
+vec4 fetchP(int i) { return texelFetch(uData, ivec2(i, 0), 0); }
+float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
+  vec3 ba = b - a; float l2 = dot(ba, ba); float rr = r1 - r2; float a2 = l2 - rr * rr; float il2 = 1.0 / l2;
+  vec3 pa = p - a; float y = dot(pa, ba); float z = y - l2;
+  vec3 xv = pa * l2 - ba * y; float x2 = dot(xv, xv);
+  float y2 = y * y * l2; float z2 = z * z * l2;
+  float k = sign(rr) * rr * rr * x2;
+  if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - r2;
+  if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - r1;
+  return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+}
+float sdCyl(vec3 p, vec3 a, vec3 b, float r) {
+  vec3 ba = b - a; vec3 pa = p - a; float baba = dot(ba, ba); float paba = dot(pa, ba);
+  float x = length(pa * baba - ba * paba) - r * baba; float y = abs(paba - baba * 0.5) - baba * 0.5;
+  float x2 = x * x; float y2 = y * y * baba;
+  float d = (max(x, y) < 0.0) ? -min(x2, y2) : (((x > 0.0) ? x2 : 0.0) + ((y > 0.0) ? y2 : 0.0));
+  return sign(d) * sqrt(abs(d)) / baba;
+}
+float prim(int i, vec3 p, out float k, out float m) {
+  vec4 t0 = fetchP(i * 4), t1 = fetchP(i * 4 + 1), t2 = fetchP(i * 4 + 2), t3 = fetchP(i * 4 + 3);
+  k = t3.x; m = t3.y;
+  int ty = int(t0.w + 0.5);
+  if (ty == 0) return sdRoundCone(p, t0.xyz, t1.xyz, t1.w, t2.w);
+  vec3 d = p - t0.xyz;
+  if (ty == 1) {
+    vec3 e3 = cross(t1.xyz, t2.xyz);
+    vec3 q = vec3(dot(d, t1.xyz), dot(d, t2.xyz), dot(d, e3));
+    vec3 r = vec3(t1.w, t2.w, t3.z);
+    float k0 = length(q / r); float k1 = max(length(q / (r * r)), 1e-4);
+    return k0 * (k0 - 1.0) / k1;
+  }
+  if (ty == 2) return sdCyl(p, t0.xyz, t1.xyz, t1.w - t3.w) - t3.w;
+  vec3 e3 = cross(t1.xyz, t2.xyz);
+  vec3 q = abs(vec3(dot(d, t1.xyz), dot(d, t2.xyz), dot(d, e3))) - vec3(t1.w, t2.w, t3.z) + t3.w;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - t3.w;
+}
+// smooth union within a part; the material is the primitive nearest the surface
+float map(vec3 p, out float mat, out float gid) {
+  float best = 1e5; mat = 0.0; gid = -1.0;
+  for (int g = 0; g < 8; g++) {
+    if (g >= uNG) break;
+    vec4 gb = uGB[g];
+    if (length(p - gb.xyz) - gb.w > best) continue;
+    float d = 1e5, nd = 1e5, nm = 0.0;
+    int s = uGR[g].x, n = uGR[g].y;
+    for (int i = 0; i < 64; i++) {
+      if (i >= n) break;
+      float k, m; float di = prim(s + i, p, k, m);
+      if (m < -0.5) continue;
+      if (di < nd) { nd = di; nm = m; }
+      if (k > 0.0) { float h = clamp(0.5 + 0.5 * (di - d) / k, 0.0, 1.0); d = mix(di, d, h) - k * h * (1.0 - h); }
+      else d = min(d, di);
+    }
+    if (d < best) { best = d; mat = nm; gid = float(g); }
+  }
+  return best;
+}
+float mapD(vec3 p) { float a, b; return map(p, a, b); }
+vec3 calcNormal(vec3 p) {
+  const vec2 e = vec2(1.0, -1.0) * 0.04;
+  return normalize(e.xyy * mapD(p + e.xyy) + e.yyx * mapD(p + e.yyx) + e.yxy * mapD(p + e.yxy) + e.xxx * mapD(p + e.xxx));
+}
+void main() {
+  vec2 lp = gl_FragCoord.xy - uOrigin;
+  vec2 q = vec2(lp.x - uPanel.x * 0.5, (uPanel.y - lp.y) - uPanel.y * 0.5) / uScale;
+  vec3 ro = uC + uR * q.x + uD * q.y + uV * 1500.0, rd = -uV;
+  vec3 oc = ro - uBound.xyz; float bb = dot(oc, rd); float h = bb * bb - dot(oc, oc) + uBound.w * uBound.w;
+  float tHit = -1.0, mat = 0.0, gid = -1.0;
+  if (h > 0.0) {
+    h = sqrt(h);
+    float t = max(-bb - h, 0.0), tEnd = -bb + h;
+    for (int i = 0; i < 200; i++) {
+      float d = map(ro + rd * t, mat, gid);
+      if (d < 0.01) { tHit = t; break; }
+      t += d * 0.9;
+      if (t > tEnd) break;
+    }
+  }
+  if (tHit > 0.0) {
+    vec3 p = ro + rd * tHit;
+    map(p, mat, gid);
+    o0 = vec4(calcNormal(p), tHit);
+    o1 = vec4(gid, mat, 1.0, 0.0);
+    return;
+  }
+  // floor: no line, just a soft grey contact shadow under the body
+  float sh = 0.0;
+  if (rd.y > 0.0) {
+    vec3 p = ro + rd * ((uFloor - ro.y) / rd.y);
+    if (length(p - uBound.xyz) < uBound.w + 30.0) sh = 1.0 - clamp(mapD(p + vec3(0.0, -1.5, 0.0)) / 16.0, 0.0, 1.0);
+  }
+  o0 = vec4(0.0, 0.0, 0.0, -1.0);
+  o1 = vec4(-1.0, -1.0, 0.0, sh);
+}`;
+
+const FS_INK = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uA, uB;
+uniform float uW;
+uniform vec3 uL;
+out vec4 o;
+const vec3 INK = vec3(0.12, 0.13, 0.15);
+vec3 fill(int m) {
+  if (m == 1 || m == 11) return vec3(0.91, 0.38, 0.29);   // worked muscle
+  if (m == 2) return vec3(0.80, 0.87, 0.94);              // shorts
+  if (m == 3) return vec3(0.95, 0.95, 0.96);              // hair
+  if (m == 5) return vec3(0.86, 0.88, 0.91);              // soles
+  if (m == 6) return vec3(0.27, 0.29, 0.32);              // iron
+  if (m == 7) return vec3(0.84, 0.88, 0.93);              // ball
+  if (m == 8) return vec3(0.31, 0.53, 0.80);              // band
+  if (m == 10) return vec3(0.82, 0.84, 0.86);             // steel
+  return vec3(1.0);                                       // skin, shoes, bench pad
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 a = texelFetch(uA, p, 0), b = texelFetch(uB, p, 0);
+  bool hit = b.z > 0.5;
+  float line = 0.0;
+  for (int i = 0; i < 16; i++) {
+    float an = float(i) * 0.392699;
+    for (int k = 1; k <= 3; k++) {
+      vec2 off = vec2(cos(an), sin(an)) * uW * float(k) / 3.0;
+      ivec2 pq = p + ivec2(round(off));
+      vec4 a2 = texelFetch(uA, pq, 0), b2 = texelFetch(uB, pq, 0);
+      bool hit2 = b2.z > 0.5;
+      if (hit != hit2) { line = 1.0; continue; }
+      if (!hit) continue;
+      if (abs(b.x - b2.x) > 0.5) line = 1.0;                       // one part in front of another
+      else if (abs(a.w - a2.w) > 2.5) line = 1.0;                   // fold behind itself
+      else if (k < 3 && abs(b.y - b2.y) > 0.5) line = max(line, 0.9); // material edge (thinner)
+      else if (k < 3 && dot(a.xyz, a2.xyz) < 0.5) line = max(line, 0.75); // crease between muscles
+    }
+  }
+  vec3 col;
+  if (hit) {
+    int m = int(b.y + 0.5);
+    float dif = dot(a.xyz, uL);
+    col = fill(m);
+    if (m == 6) col *= 0.8 + 0.45 * clamp(dif, 0.0, 1.0);
+    else col *= 0.9 + 0.1 * smoothstep(-0.35, 0.35, dif);
+  } else {
+    col = mix(vec3(1.0), vec3(0.82, 0.84, 0.87), b.w * 0.55);
+  }
+  o = vec4(mix(col, INK, line), 1.0);
+}`;
+
+function initGL(cv) {
+  const gl = cv.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+  if (!gl) throw new Error('WebGL2 is required');
+  if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('EXT_color_buffer_float is required');
+  const prog = fs => {
+    const mk = (t, src) => { const s = gl.createShader(t); gl.shaderSource(s, src); gl.compileShader(s); if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+    const p = gl.createProgram();
+    gl.attachShader(p, mk(gl.VERTEX_SHADER, VS)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs));
+    gl.bindAttribLocation(p, 0, 'aP'); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    const U = new Proxy({}, { get: (o, k) => (k in o ? o[k] : (o[k] = gl.getUniformLocation(p, k))) });
+    return { p, U };
+  };
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const tex = (w, h, fmt, type, data) => {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, fmt, w, h, 0, gl.RGBA, type, data || null);
+    return t;
+  };
+  return { gl, gbuf: prog(FS_GBUF), ink: prog(FS_INK), tex, dataTex: tex(GL_MAXP * 4, 1, gl.RGBA32F, gl.FLOAT) };
+}
+
+function basis(yaw, pitch) {
+  const ya = yaw * Math.PI / 180, pa = pitch * Math.PI / 180;
+  const cy = Math.cos(ya), sy = Math.sin(ya), cp = Math.cos(pa), sp = Math.sin(pa);
+  return { R: [cy, 0, -sy], D: [sy * sp, cp, cy * sp], V: [sy * cp, -sp, cy * cp] };
+}
+
+function poseAt(ex, t) { return lerpSpec(normSpec(ex.start), normSpec(ex.end), t); }
+
+function extent(sc, B) {
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  sc.pts.forEach(([p, r]) => {
+    const x = V.dot(p, B.R), y = V.dot(p, B.D);
+    x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r); y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r);
+  });
+  return { x0, x1, y0, y1, w: x1 - x0, h: y1 - y0 };
+}
+
+// Lay the two positions out side by side, or one above the other when the
+// body is lying down. Both share one scale, and stay lined up on the floor
+// (side by side) or on the same spot (stacked) so the change is easy to see.
+function layout(ex, outW, ss) {
+  const B = basis(ex.diagramYaw !== undefined ? ex.diagramYaw : ex.yaw || 35, ex.diagramPitch !== undefined ? ex.diagramPitch : 8);
+  const scs = [buildPrims(ex, poseAt(ex, 0)), buildPrims(ex, poseAt(ex, 1))];
+  const es = scs.map(sc => extent(sc, B));
+  const wide = Math.max(es[0].w / es[0].h, es[1].w / es[1].h) > 1.45;
+  const W = outW * ss, pad = 0.84;
+  let panels;
+  if (!wide) {
+    const pw = W / 2, ph = Math.round(W * 0.62);
+    const y0 = Math.min(es[0].y0, es[1].y0), y1 = Math.max(es[0].y1, es[1].y1);
+    const s = Math.min(pw * pad / Math.max(es[0].w, es[1].w), ph * pad / (y1 - y0));
+    panels = es.map((e, i) => ({ x: i * pw, y: 0, w: pw, h: ph, s, cx: (e.x0 + e.x1) / 2, cy: (y0 + y1) / 2 }));
+    return { B, scs, W, H: ph, panels };
+  }
+  const pw = W, ph = Math.round(W * 0.34);
+  const x0 = Math.min(es[0].x0, es[1].x0), x1 = Math.max(es[0].x1, es[1].x1);
+  const s = Math.min(pw * pad / (x1 - x0), ph * pad / Math.max(es[0].h, es[1].h));
+  panels = es.map((e, i) => ({ x: 0, y: i * ph, w: pw, h: ph, s, cx: (x0 + x1) / 2, cy: (e.y0 + e.y1) / 2 }));
+  return { B, scs, W, H: ph * 2, panels };
+}
+
+let GLR = null;
+function renderDiagram(id, outW = 1080, ss = 2) {
+  const ex = Object.assign({}, EX3[id], { work: WORK[id] }, VIEW[id]);
+  const L = layout(ex, outW, ss);
+  const cv = document.getElementById('gl');
+  cv.width = L.W; cv.height = L.H;
+  if (!GLR) GLR = initGL(cv);
+  const { gl, gbuf, ink, tex, dataTex } = GLR;
+  // G-buffer: two float targets
+  const tA = tex(L.W, L.H, gl.RGBA32F, gl.FLOAT), tB = tex(L.W, L.H, gl.RGBA32F, gl.FLOAT);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tA, 0);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, tB, 0);
+  gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+  gl.useProgram(gbuf.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, dataTex);
+  gl.uniform1i(gbuf.U.uData, 0);
+  gl.enable(gl.SCISSOR_TEST);
+  L.panels.forEach((P, i) => {
+    const sc = L.scs[i];
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GL_MAXP * 4, 1, gl.RGBA, gl.FLOAT, sc.data);
+    const gb = new Float32Array(32), gr = new Int32Array(16);
+    sc.groups.slice(0, 8).forEach((g, k) => { gb.set([g.c[0], g.c[1], g.c[2], g.r], k * 4); gr.set([g.start, g.count], k * 2); });
+    const glY = L.H - P.y - P.h;
+    gl.viewport(P.x, glY, P.w, P.h); gl.scissor(P.x, glY, P.w, P.h);
+    gl.uniform1i(gbuf.U.uNG, Math.min(sc.groups.length, 8));
+    gl.uniform4fv(gbuf.U.uGB, gb); gl.uniform2iv(gbuf.U.uGR, gr);
+    gl.uniform4fv(gbuf.U.uBound, sc.bound);
+    gl.uniform3fv(gbuf.U.uC, V.add(V.mul(L.B.R, P.cx), V.mul(L.B.D, P.cy)));
+    gl.uniform3fv(gbuf.U.uR, L.B.R); gl.uniform3fv(gbuf.U.uD, L.B.D); gl.uniform3fv(gbuf.U.uV, L.B.V);
+    gl.uniform2f(gbuf.U.uOrigin, P.x, glY); gl.uniform2f(gbuf.U.uPanel, P.w, P.h);
+    gl.uniform1f(gbuf.U.uScale, P.s); gl.uniform1f(gbuf.U.uFloor, FLOOR);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  });
+  gl.disable(gl.SCISSOR_TEST);
+  // ink pass to the canvas
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, L.W, L.H);
+  gl.useProgram(ink.p);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tA);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tB);
+  gl.uniform1i(ink.U.uA, 0); gl.uniform1i(ink.U.uB, 1);
+  gl.uniform1f(ink.U.uW, 1.25 * ss);
+  gl.uniform3fv(ink.U.uL, V.norm(V.add(V.add(V.mul(L.B.R, -0.5), V.mul(L.B.D, -0.8)), V.mul(L.B.V, 0.4))));
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.deleteTexture(tA); gl.deleteTexture(tB); gl.deleteFramebuffer(fb);
+  // downsample for smooth lines, then number the two positions
+  const out = document.createElement('canvas');
+  out.width = L.W / ss; out.height = L.H / ss;
+  const c = out.getContext('2d');
+  c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
+  c.drawImage(cv, 0, 0, out.width, out.height);
+  L.panels.forEach((P, i) => {
+    const x = P.x / ss + 40, y = P.y / ss + 40;
+    c.fillStyle = '#1F2226'; c.beginPath(); c.arc(x, y, 26, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#FFFFFF'; c.font = 'bold 32px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(String(i + 1), x, y + 1);
+  });
+  return out.toDataURL('image/png');
+}
+
+window.DIAGRAM_IDS = Object.keys(WORK);
+window.renderDiagram = renderDiagram;
+// Opened directly in a browser: render every diagram onto the page
+if (!/[?&]manual\b/.test(location.search)) {
+  window.addEventListener('load', () => {
+    const list = document.getElementById('list');
+    DIAGRAM_IDS.forEach(id => {
+      const fig = document.createElement('figure');
+      fig.innerHTML = '<img alt=""><figcaption>' + id + '</figcaption>';
+      fig.querySelector('img').src = renderDiagram(id);
+      list.appendChild(fig);
+    });
+  });
+}
+</script>
+</body>
+</html>
