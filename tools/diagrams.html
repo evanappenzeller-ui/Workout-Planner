@@ -11,10 +11,10 @@
   `node tools/render-diagrams.js` to write them to img/<exercise>.png.
 -->
 <style>
-  body { margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: #f4f5f6; color: #222; }
+  body { margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: #0E1013; color: #eee; }
   #gl { display: none; }
   figure { margin: 0 0 16px; }
-  figure img { width: min(100%, 720px); display: block; background: #fff; border: 1px solid #ddd; }
+  figure img { width: min(100%, 720px); display: block; border: 1px solid #333; }
 </style>
 </head>
 <body>
@@ -623,21 +623,22 @@ void main() {
       else if (k < 3 && dot(a.xyz, a2.xyz) < 0.5) line = max(line, 0.75); // crease between muscles
     }
   }
-  vec3 col;
   if (hit) {
     int m = int(b.y + 0.5);
     float dif = dot(a.xyz, uL);
-    col = fill(m);
+    vec3 col = fill(m);
     if (m == 6) col *= 0.8 + 0.45 * clamp(dif, 0.0, 1.0);
     else col *= 0.9 + 0.1 * smoothstep(-0.35, 0.35, dif);
-  } else {
-    col = mix(vec3(1.0), vec3(0.82, 0.84, 0.87), b.w * 0.55);
+    o = vec4(mix(col, INK, line), 1.0);
+    return;
   }
-  o = vec4(mix(col, INK, line), 1.0);
+  // background stays transparent: just the ink and a faint contact shadow
+  float al = max(line, b.w * 0.3);
+  o = vec4(INK * line, al);
 }`;
 
 function initGL(cv) {
-  const gl = cv.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true });
+  const gl = cv.getContext('webgl2', { antialias: false, preserveDrawingBuffer: true, alpha: true, premultipliedAlpha: true });
   if (!gl) throw new Error('WebGL2 is required');
   if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('EXT_color_buffer_float is required');
   const prog = fs => {
@@ -686,8 +687,13 @@ function extent(sc, B) {
 // Lay the two positions out side by side, or one above the other when the
 // body is lying down. Both share one scale, and stay lined up on the floor
 // (side by side) or on the same spot (stacked) so the change is easy to see.
-function layout(ex, outW, ss) {
+function layout(ex, outW, ss, thumb) {
   const B = basis(ex.diagramYaw !== undefined ? ex.diagramYaw : ex.yaw || 35, ex.diagramPitch !== undefined ? ex.diagramPitch : 8);
+  if (thumb) {
+    const sc = buildPrims(ex, poseAt(ex, 1)), e = extent(sc, B), W = outW * ss;
+    const s = W * 0.9 / Math.max(e.w, e.h);
+    return { B, scs: [sc], W, H: W, panels: [{ x: 0, y: 0, w: W, h: W, s, cx: (e.x0 + e.x1) / 2, cy: (e.y0 + e.y1) / 2 }], thumb: true };
+  }
   const scs = [buildPrims(ex, poseAt(ex, 0)), buildPrims(ex, poseAt(ex, 1))];
   const es = scs.map(sc => extent(sc, B));
   const wide = Math.max(es[0].w / es[0].h, es[1].w / es[1].h) > 1.45;
@@ -708,9 +714,9 @@ function layout(ex, outW, ss) {
 }
 
 let GLR = null;
-function renderDiagram(id, outW = 1080, ss = 2) {
+function renderDiagram(id, outW = 1080, ss = 2, thumb = false) {
   const ex = Object.assign({}, EX3[id], { work: WORK[id] }, VIEW[id]);
-  const L = layout(ex, outW, ss);
+  const L = layout(ex, outW, ss, thumb);
   const cv = document.getElementById('gl');
   cv.width = L.W; cv.height = L.H;
   if (!GLR) GLR = initGL(cv);
@@ -760,10 +766,10 @@ function renderDiagram(id, outW = 1080, ss = 2) {
   const c = out.getContext('2d');
   c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
   c.drawImage(cv, 0, 0, out.width, out.height);
-  L.panels.forEach((P, i) => {
+  if (!L.thumb) L.panels.forEach((P, i) => {
     const x = P.x / ss + 40, y = P.y / ss + 40;
-    c.fillStyle = '#1F2226'; c.beginPath(); c.arc(x, y, 26, 0, Math.PI * 2); c.fill();
-    c.fillStyle = '#FFFFFF'; c.font = 'bold 32px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillStyle = '#EEF1F4'; c.beginPath(); c.arc(x, y, 26, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#111317'; c.font = 'bold 32px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
     c.fillText(String(i + 1), x, y + 1);
   });
   return out.toDataURL('image/png');
