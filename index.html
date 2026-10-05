@@ -64,14 +64,14 @@ main{max-width:640px;margin:0 auto;padding:calc(18px + env(safe-area-inset-top,0
 .row-body{padding:0 0 22px}
 .row.complete .row-title{opacity:.6}
 
-/* 3D demo stage: the one loud thing */
-.demo{position:relative;background:radial-gradient(120% 90% at 50% 45%,#141a17 0%,#060807 70%);border-radius:16px;overflow:hidden}
+/* Dance-game demo stage: the one loud thing */
+.demo{position:relative;background:#22094F;border-radius:16px;overflow:hidden}
 .demo canvas{display:block;width:100%;aspect-ratio:5/4;touch-action:pan-y;cursor:grab}
 .demo canvas:active{cursor:grabbing}
-.demo-hint{position:absolute;left:12px;top:10px;color:rgba(242,245,238,.6);font-size:13px;font-weight:500;pointer-events:none}
-.swatch{display:inline-block;width:10px;height:10px;border-radius:3px;background:#3B8BEA;margin-right:6px;vertical-align:0}
+.demo-hint{position:absolute;left:12px;top:10px;color:rgba(242,245,238,.7);font-size:13px;font-weight:500;pointer-events:none}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:3px;background:#FFC21F;box-shadow:0 0 6px #FFC21F;margin-right:6px;vertical-align:0}
 .demo-btn{position:absolute;right:10px;bottom:10px;min-height:36px;padding:0 14px;border-radius:18px;border:1.5px solid rgba(242,245,238,.55);
-  background:rgba(10,36,27,.6);color:#F2F5EE;font-size:14px;font-weight:600}
+  background:rgba(34,9,79,.6);color:#F2F5EE;font-size:14px;font-weight:600}
 .equip{margin:12px 0 0;color:var(--muted);font-size:14px}
 .cues{margin:10px 0 0;padding-left:20px}
 .cues li{margin:5px 0;max-width:62ch}
@@ -271,18 +271,36 @@ function solveBody(s, face) {
 }
 
 /* ---------- Camera ---------- */
-function makeCamera(yawDeg, pitchDeg, W, H) {
+// Frame each exercise once so the coach fills the stage, like a dance game.
+function fitFor(ex) {
+  if (ex._fit) return ex._fit;
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = 155;
+  const take = (p, r) => { x0 = Math.min(x0, p[0] - r); x1 = Math.max(x1, p[0] + r); y0 = Math.min(y0, p[1] - r); y1 = Math.max(y1, p[1] + r); };
+  [ex.start, ex.end].forEach(s => {
+    const b = solveBody(normSpec(s), ex.face || 1);
+    take(b.head, 13); take(b.hip, 10); take(b.neck, 8);
+    [b.kneeN, b.kneeF, b.toeN, b.toeF, b.elbN, b.elbF].forEach(p => take(p, 7));
+    [b.wrN, b.wrF].forEach(p => take(p, 10));
+  });
+  (ex.scene3 || []).forEach(o => {
+    if (o.t === 'rod') { take(o.a, 2); take(o.b, 2); } else take(o.c, Math.max(o.s[0], o.s[1]) / 2);
+  });
+  ex._fit = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 };
+  return ex._fit;
+}
+
+function makeCamera(yawDeg, pitchDeg, W, H, fit) {
   const ya = yawDeg * Math.PI / 180, pa = pitchDeg * Math.PI / 180;
   const cy = Math.cos(ya), sy = Math.sin(ya), cp = Math.cos(pa), sp = Math.sin(pa);
-  const s = W / 250, F = 700;
+  const s = Math.min(H * 0.78 / fit.h, W * 0.8 / Math.max(fit.w, 90)), F = 700;
   return {
     s,
     p(pt) {
-      const x = pt[0] - 120, y = pt[1] - 100, z = pt[2];
+      const x = pt[0] - fit.cx, y = pt[1] - fit.cy, z = pt[2];
       const xr = x * cy - z * sy, zr = x * sy + z * cy;
       const yr = y * cp + zr * sp, d = zr * cp - y * sp;
       const k = F / (F - d);
-      return [W / 2 + xr * k * s, H / 2 + (yr + 6) * k * s, d, k * s];
+      return [W / 2 + xr * k * s, H * 0.49 + yr * k * s, d, k * s];
     },
     view(n) { // rotate a world direction into camera space
       const xr = n[0] * cy - n[2] * sy, zr = n[0] * sy + n[2] * cy;
@@ -291,85 +309,162 @@ function makeCamera(yawDeg, pitchDeg, W, H) {
   };
 }
 
-/* ---------- Scene building ---------- */
-function buildList(ex, spec, cam) {
-  const face = ex.face || 1;
-  const b = solveBody(spec, face);
-  const work = new Set(ex.work || []);
-  const L = [];
-  const cap = (a, c, ra, rb, col) => {
-    const A = cam.p(a), C = cam.p(c);
-    L.push({ k: 'cap', a: A, b: C, ra: ra * A[3], rb: rb * C[3], d: (A[2] + C[2]) / 2, col });
-  };
-  const sph = (c, r, col, bias) => { const P = cam.p(c); L.push({ k: 'sph', c: P, r: r * P[3], d: P[2] + (bias || 0), col }); };
-  const tone = m => work.has(m) ? 'hi' : 'body';
+/* ---------- Coach model ----------
+   A dance-game coach: real proportions and muscle shapes, a colorised outfit,
+   one glowing glove and a ponytail that swings with the movement.
+   Parts are grouped (torso, each arm, each leg, props) so every group gets its
+   own outline where it crosses another, which keeps overlapping limbs readable. */
+const COL = {
+  skin: ['#D3C8FF', '#8C74FF', '#3F22B0'],
+  top: ['#FFB3DE', '#FF3FA4', '#990060'],
+  legs: ['#9DF8F2', '#16BEC4', '#05585F'],
+  shoe: ['#FFFFFF', '#E7EAFF', '#8E94C8'],
+  hair: ['#6A4CC9', '#2C1570', '#120630'],
+  glove: ['#FFFFFF', '#A6F7FF', '#22B3D4'],
+  hi: ['#FFF6BF', '#FFC21F', '#B56A00'],
+  iron: ['#C3CAE0', '#5A6280', '#1B1F31'],
+  ball: ['#FFE6F4', '#FF8DCB', '#A13A76'],
+  band: ['#DAFFA6', '#7CFF4F', '#2C9A10'],
+  frame: ['#ECE6FF', '#A094DE', '#4A3F8A']
+};
+const OUTLINE = '#170436';
+const LIGHT2 = [-0.55, -0.83];
 
-  // torso: chest bar, ribcage, waist, pelvis
-  const chest = V.add(b.neck, V.mul(b.tdir, -9));
-  const waist = V.add(b.hip, V.mul(b.tdir, 17));
-  const torsoTone = work.has('chest') || work.has('back') ? 'hi' : 'body';
-  cap(V.add(chest, [0, 0, 8]), V.add(chest, [0, 0, -8]), 11, 11, torsoTone);
-  cap(V.add(chest, [0, 0, 4]), V.add(waist, [0, 0, 3]), 10, 8.5, torsoTone);
-  cap(V.add(chest, [0, 0, -4]), V.add(waist, [0, 0, -3]), 10, 8.5, torsoTone);
-  cap(V.add(waist, [0, 0, 3]), V.add(b.hip, [0, 0, 3]), 8.5, 8.5, tone('core'));
-  cap(V.add(waist, [0, 0, -3]), V.add(b.hip, [0, 0, -3]), 8.5, 8.5, tone('core'));
-  cap(b.hipN, b.hipF, 9, 9, tone('glutes'));
-  cap(b.neck, b.neckTop, 4.2, 4, 'body');
-  sph(b.head, 8.6, 'body');
-  // shoulders + arms
-  [[b.shN, b.elbN, b.wrN], [b.shF, b.elbF, b.wrF]].forEach(([sh, el, wr]) => {
-    sph(sh, 6.6, tone('shoulders'), 1.5);
-    cap(sh, el, 4.8, 3.9, tone('arms'));
-    cap(el, wr, 3.8, 2.8, 'body');
-    sph(wr, 3.1, 'body');
+function stepTail(st, anchor, head, dt) {
+  const N = 6, SEG = 3.6;
+  let settle = !st.tail || (dt === 0 && V.len(V.sub(st.tail[0].p, anchor)) > 0.5);
+  if (!st.tail) st.tail = Array.from({ length: N }, (_, i) => ({ p: [anchor[0], anchor[1] + i * SEG, anchor[2]], o: [anchor[0], anchor[1] + i * SEG, anchor[2]] }));
+  if (!settle && dt === 0) return;
+  const steps = settle ? 150 : Math.min(4, Math.max(1, Math.ceil(dt / 8)));
+  const h = settle ? 0.016 : Math.min(dt, 50) / 1000 / steps;
+  const T = st.tail;
+  for (let s = 0; s < steps; s++) {
+    T[0].p = anchor.slice(); T[0].o = anchor.slice();
+    for (let i = 1; i < N; i++) {
+      const q = T[i], v = V.mul(V.sub(q.p, q.o), 0.95);
+      q.o = q.p; q.p = V.add(V.add(q.p, v), [0, 750 * h * h, 0]);
+    }
+    for (let k = 0; k < 2; k++) for (let i = 1; i < N; i++) {
+      const a = T[i - 1].p, q = T[i], d = V.sub(q.p, a), L = V.len(d) || 1e-3;
+      q.p = V.add(a, V.mul(d, SEG / L));
+      const hd = V.sub(q.p, head), hl = V.len(hd) || 1e-3;
+      if (hl < 8.8) q.p = V.add(head, V.mul(hd, 8.8 / hl));
+      if (q.p[1] > 154) q.p[1] = 154;
+    }
+  }
+}
+
+function buildCoach(ex, spec, cam, st, dt) {
+  const face = ex.face || 1, b = solveBody(spec, face), work = new Set(ex.work || []);
+  const rad = Math.PI / 180, t = b.tdir;
+  const f = [Math.cos(spec.T * rad) * face, Math.sin(spec.T * rad) * face, 0];
+  const hd = dirDeg(spec.H), hf = [Math.cos(spec.H * rad) * face, Math.sin(spec.H * rad) * face, 0];
+  const groups = [];
+  let g, hasHi = false;
+  const group = bias => { g = { items: [], bias: bias || 0 }; groups.push(g); };
+  const cap = (a, c, ra, rb, col, hi) => {
+    const A = cam.p(a), C = cam.p(c);
+    g.items.push({ k: 'cap', a: A, b: C, ra: ra * A[3], rb: rb * C[3], d: (A[2] + C[2]) / 2, col, hi: !!hi });
+    if (hi) hasHi = true;
+  };
+  const sph = (c, r, col, hi) => {
+    const P = cam.p(c);
+    g.items.push({ k: 'sph', c: P, r: r * P[3], d: P[2], col, hi: !!hi });
+    if (hi) hasHi = true;
+  };
+  // point offset along the torso (a), toward the chest (c) and sideways (z)
+  const O = (p, a, c, z) => [p[0] + t[0] * a + f[0] * c, p[1] + t[1] * a + f[1] * c, p[2] + (z || 0)];
+  const hiGl = work.has('glutes'), hiCore = work.has('core'), hiChest = work.has('chest'), hiBack = work.has('back');
+
+  // torso, neck and head (all tapered capsules so the body reads as one smooth shape)
+  group();
+  const hiTorso = hiChest || hiBack;
+  cap(O(b.hip, 0, 0.5, 7.5), O(b.hip, 0, 0.5, -7.5), 8.6, 8.6, 'legs', hiGl);
+  cap(O(b.hip, -1, -3.4, 4.6), O(b.hip, -1, -3.4, -4.6), 7.4, 7.4, 'legs', hiGl);
+  cap(O(b.hip, 4, 0.6, 3.4), O(b.hip, 18, 0.2, 3.4), 7.6, 6.9, 'skin', hiCore);
+  cap(O(b.hip, 4, 0.6, -3.4), O(b.hip, 18, 0.2, -3.4), 7.6, 6.9, 'skin', hiCore);
+  cap(O(b.hip, 17, 0.4, 4.4), O(b.hip, 34, 0.2, 6.6), 7.8, 9.4, 'top', hiTorso);
+  cap(O(b.hip, 17, 0.4, -4.4), O(b.hip, 34, 0.2, -6.6), 7.8, 9.4, 'top', hiTorso);
+  cap(O(b.hip, 29, 3.2, 4.8), O(b.hip, 29, 3.2, -4.8), 6.2, 6.2, 'top', hiTorso);
+  cap(O(b.neck, -4.5, -1.2, 10), O(b.neck, -4.5, -1.2, -10), 6, 6, 'top', hiTorso);
+  cap(O(b.neck, -3, 0, 0), V.add(b.neck, V.mul(hd, 9)), 3.9, 3.5, 'skin');
+  const head = V.add(b.neck, V.mul(hd, 16.5));
+  const at = (p, up, fwd) => V.add(V.add(p, V.mul(hd, up)), V.mul(hf, fwd));
+  cap(at(head, -4.6, 2.2), at(head, 1.2, 0), 4.9, 7.6, 'skin');
+  cap(at(head, 2.6, -1.6), at(head, -2.4, -3.2), 7.9, 6.4, 'hair');
+
+  // ponytail with follow-through
+  const anchor = at(head, 3.2, -7.2);
+  stepTail(st, anchor, head, dt);
+  group();
+  const tail = st.tail;
+  for (let i = 1; i < tail.length; i++) cap(tail[i - 1].p, tail[i].p, 3.4 - i * 0.36, 3.4 - (i + 1) * 0.36, 'hair');
+
+  // arms: near hand wears the glove
+  const hands = {};
+  [['N', b.shN, b.elbN, b.wrN, 'glove'], ['F', b.shF, b.elbF, b.wrF, 'skin']].forEach(([k, sh, el, wr, handCol]) => {
+    group();
+    const hiA = work.has('arms'), hiS = work.has('shoulders');
+    const mid = V.lerp(sh, el, 0.45), fm = V.lerp(el, wr, 0.3);
+    cap(O(sh, -1.5, 0, 0), V.lerp(sh, el, 0.35), 5.4, 4.5, 'skin', hiS);
+    cap(sh, mid, 4.5, 4.2, 'skin', hiA);
+    cap(mid, el, 4.2, 3.1, 'skin', hiA);
+    cap(el, fm, 3.2, 3.4, 'skin');
+    cap(fm, wr, 3.4, 2.3, 'skin');
+    const u = V.norm(V.sub(wr, el)), hand = V.add(wr, V.mul(u, 4.2));
+    cap(wr, hand, 2.6, 3.2, handCol);
+    hands[k] = hand;
   });
+
   // legs
   [[b.hipN, b.kneeN, b.ankleN, b.toeN], [b.hipF, b.kneeF, b.ankleF, b.toeF]].forEach(([hp, kn, an, to]) => {
-    cap(hp, kn, 7.4, 5.2, tone('thighs'));
-    cap(kn, an, 5.0, 3.4, 'body');
-    cap(an, to, 3.3, 2.6, 'body');
+    group();
+    const hiT = work.has('thighs');
+    const fd = V.norm(V.sub(to, an)), sd = V.norm(V.sub(an, kn));
+    const th = V.lerp(hp, kn, 0.4), calf = V.sub(V.lerp(kn, an, 0.3), V.mul(fd, 1.2));
+    cap(hp, th, 7.7, 6.6, 'legs', hiT);
+    cap(th, kn, 6.6, 4.6, 'legs', hiT);
+    cap(kn, calf, 4.6, 4.5, 'legs');
+    cap(calf, an, 4.5, 2.9, 'legs');
+    cap(V.add(V.sub(an, V.mul(fd, 3)), V.mul(sd, 1.2)), V.add(to, V.mul(fd, 1.5)), 3.7, 3.1, 'shoe');
   });
 
   // equipment that moves with the body
+  group(2);
   const dumbbell = (c, axis) => {
     const ax = axis === 'y' ? [0, 1, 0] : [0, 0, 1];
     cap(V.add(c, V.mul(ax, -5)), V.add(c, V.mul(ax, 5)), 1.7, 1.7, 'iron');
     cap(V.add(c, V.mul(ax, -9.5)), V.add(c, V.mul(ax, -5.5)), 5.6, 5.6, 'iron');
     cap(V.add(c, V.mul(ax, 5.5)), V.add(c, V.mul(ax, 9.5)), 5.6, 5.6, 'iron');
   };
+  const hN = hands.N, hF = hands.F;
   (ex.props || []).forEach(pr => {
-    if (pr === 'db') { dumbbell(b.wrN); if (!b.oneSided) dumbbell(b.wrF); }
-    else if (pr === 'goblet') { dumbbell([(b.wrN[0] + b.wrF[0]) / 2, (b.wrN[1] + b.wrF[1]) / 2, 0], 'y'); }
-    else if (pr === 'hipdb') { dumbbell([b.hip[0], b.hip[1] - 11, 0]); }
+    if (pr === 'db') { dumbbell(hN); if (!b.oneSided) dumbbell(hF); }
+    else if (pr === 'goblet') dumbbell([(hN[0] + hF[0]) / 2, (hN[1] + hF[1]) / 2, 0], 'y');
+    else if (pr === 'hipdb') dumbbell([b.hip[0], b.hip[1] - 11, 0]);
     else if (pr === 'trapbar') {
-      const y = b.wrN[1] + 1, x = b.wrN[0];
+      const y = hN[1], x = hN[0], hz = Math.abs(hN[2]);
       [1, -1].forEach(sg => {
-        const hz = Math.abs(b.wrN[2]);
         cap([x - 9, y, sg * hz], [x + 9, y, sg * hz], 1.8, 1.8, 'iron');
         cap([x, y + 1, sg * (hz + 1)], [x, y + 1, sg * 40], 2.1, 2.1, 'iron');
         cap([x, y + 1, sg * 30], [x, y + 1, sg * 35], 14, 14, 'iron');
       });
-      cap([x - 9, y, b.wrN[2]], [x - 9, y, b.wrF[2]], 1.6, 1.6, 'iron');
-      cap([x + 9, y, b.wrN[2]], [x + 9, y, b.wrF[2]], 1.6, 1.6, 'iron');
+      cap([x - 9, y, hz], [x - 9, y, -hz], 1.6, 1.6, 'iron');
+      cap([x + 9, y, hz], [x + 9, y, -hz], 1.6, 1.6, 'iron');
     } else if (pr === 'wheel') {
-      const c = [b.wrN[0], b.wrN[1] + 5, 0];
+      const c = [hN[0], hN[1] + 4, 0];
       cap(V.add(c, [0, 0, -3]), V.add(c, [0, 0, 3]), 8.5, 8.5, 'iron');
-      cap([b.wrN[0], b.wrN[1], b.wrN[2]], [b.wrF[0], b.wrF[1], b.wrF[2]], 1.6, 1.6, 'iron');
+      cap(hN, hF, 1.6, 1.6, 'iron');
     } else if (pr === 'ball') {
-      const c = [(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0];
-      sph(c, 13.5, 'ball');
-    } else if (pr === 'band') {
-      cap(b.wrN, b.wrF, 0.9, 0.9, 'band');
-    }
+      sph([(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0], 13.5, 'ball');
+    } else if (pr === 'band') cap(hN, hF, 0.9, 0.9, 'band');
   });
 
-  // static equipment
-  (ex.scene3 || []).forEach(o => {
-    if (o.t === 'rod') cap(o.a, o.b, o.r || 1.7, o.r || 1.7, o.col || 'frame');
-    else if (o.t === 'box') boxFaces(o, cam, L);
+  groups.forEach(gr => {
+    gr.items.sort((p, q) => p.d - q.d);
+    gr.d = gr.items.length ? gr.items.reduce((s, it) => s + it.d, 0) / gr.items.length + gr.bias : 0;
   });
-  L.sort((p, q) => p.d - q.d);
-  return L;
+  return { groups: groups.filter(gr => gr.items.length).sort((p, q) => p.d - q.d), hasHi };
 }
 
 function boxFaces(o, cam, L) {
@@ -391,78 +486,247 @@ function boxFaces(o, cam, L) {
     if (nv[2] <= 0.02) return;
     const pts = f.c.map(c => cam.p(corner(c[0], c[1], c[2])));
     const shade = 0.32 + 0.68 * Math.max(0, V.dot(nw, light));
-    L.push({ k: 'poly', pts, d: pts.reduce((s, p) => s + p[2], 0) / 4 - 2, col: o.col || 'pad', shade });
+    L.push({ k: 'poly', pts, d: pts.reduce((s, p) => s + p[2], 0) / 4 - 2, shade });
   });
 }
 
 /* ---------- Drawing ---------- */
-const PALETTE = {
-  body: ['#EEF1F2', '#AEB4B8', '#3E4448'],
-  hi: ['#9FD0FF', '#3B8BEA', '#123F78'],
-  iron: ['#7A8086', '#2E3236', '#0E1012'],
-  frame: ['#F1F3F4', '#BFC5C9', '#62696E'],
-  ball: ['#DDE3E6', '#8E979C', '#353B3F'],
-  band: ['#FFD66B', '#F0B429', '#A06B00'],
-  pad: [42, 46, 51]
-};
-const LIGHT2 = [-0.55, -0.83];
+function pathItem(ctx, it, grow) {
+  ctx.beginPath();
+  if (it.k === 'sph') { ctx.arc(it.c[0], it.c[1], it.r + grow, 0, Math.PI * 2); return; }
+  const A = it.a, B = it.b, ra = it.ra + grow, rb = it.rb + grow;
+  const dx = B[0] - A[0], dy = B[1] - A[1], d = Math.hypot(dx, dy);
+  if (d <= Math.abs(ra - rb) + 0.01) { const c = ra > rb ? A : B; ctx.arc(c[0], c[1], Math.max(ra, rb), 0, Math.PI * 2); return; }
+  const th = Math.atan2(dy, dx), ph = Math.acos((ra - rb) / d);
+  ctx.arc(A[0], A[1], ra, th + ph, th - ph + Math.PI * 2);
+  ctx.arc(B[0], B[1], rb, th - ph, th + ph);
+  ctx.closePath();
+}
 
-function drawList(ctx, L) {
+function fillFor(ctx, it, pal) {
+  let g;
+  if (it.k === 'sph') {
+    const [x, y] = it.c, r = it.r;
+    g = ctx.createRadialGradient(x + LIGHT2[0] * r * 0.4, y + LIGHT2[1] * r * 0.4, r * 0.1, x, y, r * 1.05);
+    g.addColorStop(0, pal[0]); g.addColorStop(0.6, pal[1]); g.addColorStop(1, pal[2]);
+    return g;
+  }
+  const [ax, ay] = it.a, [bx, by] = it.b, dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy);
+  let nx = d > 0.01 ? -dy / d : 1, ny = d > 0.01 ? dx / d : 0;
+  if (nx * LIGHT2[0] + ny * LIGHT2[1] < 0) { nx = -nx; ny = -ny; }
+  const mx = (ax + bx) / 2, my = (ay + by) / 2, rm = Math.max(it.ra, it.rb);
+  g = ctx.createLinearGradient(mx + nx * rm, my + ny * rm, mx - nx * rm, my - ny * rm);
+  g.addColorStop(0, pal[0]); g.addColorStop(0.45, pal[1]); g.addColorStop(1, pal[2]);
+  return g;
+}
+
+// Toon pass: each group gets one outline, then its fills, so limbs read
+// separately while a group's own parts merge into one smooth shape.
+// The muscle layer mirrors the same occlusion so only visible worked muscles glow.
+function paintCoach(cctx, hctx, groups, lw) {
+  for (const gr of groups) {
+    cctx.fillStyle = OUTLINE;
+    for (const it of gr.items) { pathItem(cctx, it, lw); cctx.fill(); }
+    for (const it of gr.items) { pathItem(cctx, it, 0); cctx.fillStyle = fillFor(cctx, it, COL[it.col]); cctx.fill(); }
+    if (!hctx) continue;
+    hctx.globalCompositeOperation = 'destination-out'; hctx.fillStyle = '#000';
+    for (const it of gr.items) { pathItem(hctx, it, lw); hctx.fill(); }
+    for (const it of gr.items) {
+      pathItem(hctx, it, 0);
+      if (it.hi) { hctx.globalCompositeOperation = 'source-over'; hctx.fillStyle = fillFor(hctx, it, COL.hi); }
+      else { hctx.globalCompositeOperation = 'destination-out'; hctx.fillStyle = '#000'; }
+      hctx.fill();
+    }
+  }
+  if (hctx) hctx.globalCompositeOperation = 'source-over';
+}
+
+function paintScene(ctx, ex, cam, lw) {
+  const L = [];
+  (ex.scene3 || []).forEach(o => {
+    if (o.t === 'rod') {
+      const A = cam.p(o.a), C = cam.p(o.b), r = o.r || 1.7;
+      L.push({ k: 'cap', a: A, b: C, ra: r * A[3], rb: r * C[3], d: (A[2] + C[2]) / 2 });
+    } else boxFaces(o, cam, L);
+  });
+  L.sort((p, q) => p.d - q.d);
   for (const it of L) {
     if (it.k === 'poly') {
-      const base = it.col === 'frame' ? [210, 215, 218] : PALETTE.pad;
-      const c = base.map(v => Math.round(v * it.shade + (it.col === 'frame' ? 0 : 14 * it.shade)));
+      const c = [96, 52, 178].map(v => Math.round(v * it.shade + 18));
       ctx.fillStyle = 'rgb(' + c.join(',') + ')';
       ctx.beginPath(); it.pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = 'rgba(150,240,255,.75)'; ctx.lineWidth = 1.2; ctx.lineJoin = 'round'; ctx.stroke();
       continue;
     }
-    const pal = PALETTE[it.col];
-    if (it.k === 'sph') {
-      const [x, y] = it.c, r = it.r;
-      const g = ctx.createRadialGradient(x + LIGHT2[0] * r * 0.45, y + LIGHT2[1] * r * 0.45, r * 0.08, x, y, r * 1.05);
-      g.addColorStop(0, pal[0]); g.addColorStop(0.55, pal[1]); g.addColorStop(1, pal[2]);
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-      continue;
-    }
-    const [ax, ay] = it.a, [bx, by] = it.b, ra = it.ra, rb = it.rb;
-    const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy);
-    let nx = d > 0.01 ? -dy / d : 1, ny = d > 0.01 ? dx / d : 0;
-    if (nx * LIGHT2[0] + ny * LIGHT2[1] < 0) { nx = -nx; ny = -ny; }
-    const mx = (ax + bx) / 2, my = (ay + by) / 2, rm = Math.max(ra, rb);
-    const g = ctx.createLinearGradient(mx + nx * rm, my + ny * rm, mx - nx * rm, my - ny * rm);
-    g.addColorStop(0, pal[0]); g.addColorStop(0.42, pal[1]); g.addColorStop(1, pal[2]);
-    ctx.fillStyle = g;
-    ctx.beginPath(); ctx.arc(ax, ay, ra, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(bx, by, rb, 0, Math.PI * 2); ctx.fill();
-    if (d > Math.abs(ra - rb)) {
-      const th = Math.atan2(dy, dx), ph = Math.acos((ra - rb) / d);
-      ctx.beginPath();
-      ctx.moveTo(ax + ra * Math.cos(th + ph), ay + ra * Math.sin(th + ph));
-      ctx.lineTo(bx + rb * Math.cos(th + ph), by + rb * Math.sin(th + ph));
-      ctx.lineTo(bx + rb * Math.cos(th - ph), by + rb * Math.sin(th - ph));
-      ctx.lineTo(ax + ra * Math.cos(th - ph), ay + ra * Math.sin(th - ph));
-      ctx.closePath(); ctx.fill();
-    }
+    ctx.fillStyle = OUTLINE; pathItem(ctx, it, lw); ctx.fill();
+    pathItem(ctx, it, 0); ctx.fillStyle = fillFor(ctx, it, COL.frame); ctx.fill();
   }
 }
 
-function drawStage(ctx, W, H, cam, ex) {
-  ctx.clearRect(0, 0, W, H);
-  // faint floor disc so the figure has somewhere to stand
-  const pts = [];
-  for (let i = 0; i < 40; i++) { const a = i / 40 * Math.PI * 2; pts.push(cam.p([120 + Math.cos(a) * 92, 153, Math.sin(a) * 50])); }
-  const c = cam.p([120, 153, 0]);
-  const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], 92 * c[3]);
-  g.addColorStop(0, 'rgba(255,255,255,0.10)'); g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
+// Fixed sparkle positions (fractions of the stage) so the backdrop is stable
+const BOKEH = Array.from({ length: 18 }, (_, i) => {
+  const r = n => { const v = Math.sin(n) * 43758.5453; return v - Math.floor(v); };
+  return { x: r(i * 12.9898 + 1), y: r(i * 78.233 + 2) * 0.62, s: 0.008 + r(i * 3.7 + 5) * 0.022, sp: 0.15 + r(i * 9.1) * 0.5, c: i % 3 };
+});
+const BOKEH_COL = ['255,120,220', '120,235,255', '255,220,120'];
+
+function drawStage(ctx, W, H, cam, fit, now) {
+  const floorY = cam.p([fit.cx, 155, 0])[1];
+  const horizon = Math.max(H * 0.35, Math.min(floorY - H * 0.12, H * 0.85));
+  let g = ctx.createLinearGradient(0, 0, 0, horizon);
+  g.addColorStop(0, '#22094F'); g.addColorStop(1, '#6E1A8C');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, horizon + 1);
+  g = ctx.createLinearGradient(0, horizon, 0, H);
+  g.addColorStop(0, '#3A0D66'); g.addColorStop(1, '#0D0327');
+  ctx.fillStyle = g; ctx.fillRect(0, horizon, W, H - horizon);
+  // backlight behind the coach
+  g = ctx.createRadialGradient(W / 2, H * 0.42, 0, W / 2, H * 0.42, W * 0.62);
+  g.addColorStop(0, 'rgba(255,80,190,.55)'); g.addColorStop(0.5, 'rgba(160,60,220,.22)'); g.addColorStop(1, 'rgba(120,40,200,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  // sweeping light beams
+  const sec = now / 1000;
+  for (let i = 0; i < 4; i++) {
+    const ox = W * (0.1 + i * 0.27), sway = Math.sin(sec * 0.6 + i * 1.7) * 0.35 + (i - 1.5) * 0.18;
+    const len = H * 1.2, spread = W * 0.09;
+    const tx = ox + Math.sin(sway) * len, ty = Math.cos(sway) * len;
+    g = ctx.createLinearGradient(ox, 0, tx, ty);
+    g.addColorStop(0, i % 2 ? 'rgba(120,235,255,.22)' : 'rgba(255,120,220,.22)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.moveTo(ox - 3, -4); ctx.lineTo(ox + 3, -4);
+    ctx.lineTo(tx + Math.cos(sway) * spread, ty - Math.sin(sway) * spread);
+    ctx.lineTo(tx - Math.cos(sway) * spread, ty + Math.sin(sway) * spread); ctx.closePath(); ctx.fill();
+  }
+  for (const k of BOKEH) {
+    const y = ((k.y - sec * k.sp * 0.04) % 0.62 + 0.62) % 0.62 * horizon / 0.62;
+    const r = k.s * W, x = k.x * W + Math.sin(sec * k.sp + k.x * 9) * 6;
+    g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, 'rgba(' + BOKEH_COL[k.c] + ',.55)'); g.addColorStop(1, 'rgba(' + BOKEH_COL[k.c] + ',0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+  return { floorY, horizon };
 }
 
-function renderFrame(ctx, W, H, ex, t, yaw, pitch) {
-  const cam = makeCamera(yaw, pitch, W, H);
-  const a = normSpec(ex.start), b = normSpec(ex.end);
-  const spec = lerpSpec(a, b, t);
-  drawStage(ctx, W, H, cam, ex);
-  drawList(ctx, buildList(ex, spec, cam));
+function drawFloorSpot(ctx, W, H, cam, fit) {
+  const pts = [];
+  for (let i = 0; i < 48; i++) { const a = i / 48 * Math.PI * 2; pts.push(cam.p([fit.cx + Math.cos(a) * 70, 155, Math.sin(a) * 48])); }
+  const c = cam.p([fit.cx, 155, 0]);
+  const g = ctx.createRadialGradient(c[0], c[1], 0, c[0], c[1], 72 * c[3]);
+  g.addColorStop(0, 'rgba(255,140,230,.45)'); g.addColorStop(0.7, 'rgba(160,90,255,.15)'); g.addColorStop(1, 'rgba(160,90,255,0)');
+  ctx.save();
+  ctx.fillStyle = g; ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(130,240,255,.25)'; ctx.lineWidth = 7; ctx.stroke();
+  ctx.strokeStyle = 'rgba(160,245,255,.9)'; ctx.lineWidth = 1.6; ctx.stroke();
+  ctx.restore();
+}
+
+const POP_WORDS = ['PERFECT', 'SUPER', 'PERFECT', 'YEAH!'];
+function drawPop(ctx, W, H, pop) {
+  const k = pop.k, word = POP_WORDS[pop.n % POP_WORDS.length];
+  const back = x => { const c = 1.9; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+  const sc = k < 0.18 ? Math.max(0.01, back(k / 0.18)) : 1;
+  const alpha = k > 0.72 ? Math.max(0, 1 - (k - 0.72) / 0.28) : 1;
+  const x = W * 0.73, y = H * 0.15 - k * H * 0.03, size = Math.round(W * 0.085);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(x, y); ctx.scale(sc, sc); ctx.transform(1, 0, -0.18, 1, 0, 0);
+  ctx.font = '800 ' + size + 'px "Big Shoulders Display", Impact, "Arial Narrow", sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = size * 0.34; ctx.strokeStyle = 'rgba(255,60,170,.35)'; ctx.strokeText(word, 0, 0);
+  ctx.lineWidth = size * 0.16; ctx.strokeStyle = '#3B0A6E'; ctx.strokeText(word, 0, 0);
+  const g = ctx.createLinearGradient(0, -size / 2, 0, size / 2);
+  g.addColorStop(0, '#FFFFFF'); g.addColorStop(0.45, '#FFE36B'); g.addColorStop(1, '#FF5FB8');
+  ctx.fillStyle = g; ctx.fillText(word, 0, 0);
+  ctx.restore();
+  // sparkles burst out from the word
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#FFF6C8';
+  for (let i = 0; i < 7; i++) {
+    const a = i / 7 * Math.PI * 2 + 0.4, dist = size * (0.9 + k * 1.6), r = size * 0.13 * (1 - k * 0.7);
+    const sx = x + Math.cos(a) * dist * 1.5, sy = y + Math.sin(a) * dist * 0.6;
+    ctx.beginPath();
+    for (let j = 0; j < 8; j++) { const rr = j % 2 ? r * 0.28 : r, aa = j * Math.PI / 4 + k * 2; ctx.lineTo(sx + Math.cos(aa) * rr, sy + Math.sin(aa) * rr); }
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Soft neon glow without shadowBlur (too slow on phones): shrink the silhouette
+// in two steps, tint it, then let the browser's smoothing blur it back up.
+function makeGlow(src, g4, g8, color) {
+  for (const [L, from] of [[g4, src], [g8, g4.c]]) {
+    L.x.globalCompositeOperation = 'source-over';
+    L.x.clearRect(0, 0, L.c.width, L.c.height);
+    L.x.drawImage(from, 0, 0, L.c.width, L.c.height);
+  }
+  for (const L of [g4, g8]) {
+    L.x.globalCompositeOperation = 'source-in';
+    L.x.fillStyle = color; L.x.fillRect(0, 0, L.c.width, L.c.height);
+  }
+  blurSmall(g4, 1);
+  blurSmall(g8, 3);
+}
+// Box blur on a tiny canvas: average five shifted copies, a few times over
+function blurSmall(L, passes) {
+  const w = L.c.width, h = L.c.height, T = L.t;
+  if (T.c.width !== w || T.c.height !== h) { T.c.width = w; T.c.height = h; }
+  for (let i = 0; i < passes; i++) {
+    T.x.globalCompositeOperation = 'source-over'; T.x.globalAlpha = 1; T.x.clearRect(0, 0, w, h);
+    T.x.globalCompositeOperation = 'lighter'; T.x.globalAlpha = 0.2;
+    [[0, 0], [-1, 0], [1, 0], [0, -1], [0, 1]].forEach(([dx, dy]) => T.x.drawImage(L.c, dx, dy));
+    L.x.globalCompositeOperation = 'copy'; L.x.drawImage(T.c, 0, 0);
+  }
+  L.x.globalCompositeOperation = 'source-over';
+}
+function drawGlow(ctx, W, H, g4, g8, wide, tight) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = wide;
+  ctx.drawImage(g8.c, 0, 0, W, H);
+  if (tight) { ctx.globalAlpha = tight; ctx.drawImage(g4.c, 0, 0, W, H); ctx.drawImage(g4.c, 0, 0, W, H); }
+  ctx.restore();
+}
+
+function renderFrame(ctx, W, H, ex, st, now, dt) {
+  const fit = fitFor(ex), cam = makeCamera(st.yaw, st.pitch, W, H, fit);
+  const spec = lerpSpec(normSpec(ex.start), normSpec(ex.end), st.p);
+  if (!reduceMotion) { const beat = Math.sin(st.loopT * Math.PI * 8); spec.H += beat * 2.2; spec.T += beat * 0.6; }
+  const stage = drawStage(ctx, W, H, cam, fit, now);
+  const lw = Math.max(1.1, cam.s * 0.7);
+  const coach = buildCoach(ex, spec, cam, st, dt);
+  const { coach: cv, cctx, hi, hctx } = st.layers;
+  cctx.clearRect(0, 0, W, H);
+  if (coach.hasHi) hctx.clearRect(0, 0, W, H);
+  paintCoach(cctx, coach.hasHi ? hctx : null, coach.groups, lw);
+
+  // mirror-floor reflection, fading with distance
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, stage.floorY, W, H - stage.floorY); ctx.clip();
+  ctx.globalAlpha = 0.15; ctx.translate(0, 2 * stage.floorY); ctx.scale(1, -1);
+  ctx.drawImage(cv, 0, 0, W, H);
+  ctx.restore();
+  const fade = ctx.createLinearGradient(0, stage.floorY, 0, Math.min(H, stage.floorY + H * 0.22));
+  fade.addColorStop(0, 'rgba(13,3,39,0)'); fade.addColorStop(1, 'rgba(13,3,39,.85)');
+  ctx.fillStyle = fade; ctx.fillRect(0, stage.floorY, W, H - stage.floorY);
+  drawFloorSpot(ctx, W, H, cam, fit);
+  paintScene(ctx, ex, cam, lw);
+
+  // the coach: neon halo, then a tight white rim
+  const pulse = 0.5 + 0.5 * Math.sin(st.loopT * Math.PI * 4);
+  const { g4, g8 } = st.layers;
+  if (coach.hasHi) {
+    makeGlow(hi, g4, g8, '#FFB21F');
+    drawGlow(ctx, W, H, g4, g8, 0.5 + 0.5 * pulse, 0);
+  }
+  makeGlow(cv, g4, g8, '#5FE6FF');
+  drawGlow(ctx, W, H, g4, g8, 1, 0.8);
+  ctx.drawImage(cv, 0, 0, W, H);
+  if (coach.hasHi) { ctx.save(); ctx.globalAlpha = 0.85 + 0.15 * pulse; ctx.drawImage(hi, 0, 0, W, H); ctx.restore(); }
+  if (st.pop) drawPop(ctx, W, H, st.pop);
 }
 
 
@@ -788,30 +1052,42 @@ function mountDemo() {
   const ctx = cv.getContext && cv.getContext('2d');
   if (!ctx) return;
   const ease = x => x < .5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2;
-  const st = { raf: 0, playing: !reduceMotion, atEnd: false, t0: performance.now(), p: 0, yaw: ex.yaw || 35, pitch: 14, W: 0, H: 0 };
+  const mk = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d')]; };
+  const [coach, cctx] = mk(), [hi, hctx] = mk(), [c4, x4] = mk(), [c8, x8] = mk(), [t4, y4] = mk(), [t8, y8] = mk();
+  const st = { raf: 0, playing: !reduceMotion, atEnd: false, t0: performance.now(), last: 0, now: performance.now(), loopT: 0, p: 0, pop: null,
+    yaw: ex.yaw || 35, pitch: 12, W: 0, H: 0, tail: null, layers: { coach, cctx, hi, hctx, g4: { c: c4, x: x4, t: { c: t4, x: y4 } }, g8: { c: c8, x: x8, t: { c: t8, x: y8 } } } };
   anim = st;
-  const draw = () => { if (st.W) renderFrame(ctx, st.W, st.H, ex, st.p, st.yaw, st.pitch); };
+  const draw = dt => { if (st.W) renderFrame(ctx, st.W, st.H, ex, st, st.now, dt || 0); };
   const size = () => {
     const r = cv.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
     st.W = r.width; st.H = r.height;
-    cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    [[cv, ctx], [coach, cctx], [hi, hctx]].forEach(([c, x]) => {
+      c.width = Math.round(r.width * dpr); c.height = Math.round(r.height * dpr);
+      x.setTransform(dpr, 0, 0, dpr, 0, 0);
+    });
+    c4.width = Math.max(1, Math.round(r.width / 4)); c4.height = Math.max(1, Math.round(r.height / 4));
+    c8.width = Math.max(1, Math.round(r.width / 8)); c8.height = Math.max(1, Math.round(r.height / 8));
   };
   st.onResize = () => { size(); draw(); };
   window.addEventListener('resize', st.onResize);
+  const REP = 3800;
   const loop = ts => {
     if (!st.playing || anim !== st) return;
-    const t = ((ts - st.t0) % 3800) / 3800;
+    const dt = st.last ? ts - st.last : 16;
+    st.last = ts; st.now = ts;
+    const el = ts - st.t0, t = (el % REP) / REP;
+    st.loopT = t;
     st.p = t < .1 ? 0 : t < .48 ? ease((t - .1) / .38) : t < .6 ? 1 : 1 - ease((t - .6) / .4);
-    draw(); st.raf = requestAnimationFrame(loop);
+    st.pop = t >= .46 && t < .8 ? { k: (t - .46) / .34, n: Math.floor(el / REP) } : null;
+    draw(dt); st.raf = requestAnimationFrame(loop);
   };
   const setBtn = () => { btn.textContent = reduceMotion ? (st.atEnd ? 'Show start' : 'Show finish') : (st.playing ? 'Pause' : 'Play'); };
   size(); draw(); setBtn();
   if (st.playing) st.raf = requestAnimationFrame(loop);
   btn.onclick = () => {
     if (reduceMotion) { st.atEnd = !st.atEnd; st.p = st.atEnd ? 1 : 0; draw(); }
-    else if (st.playing) { st.playing = false; cancelAnimationFrame(st.raf); }
-    else { st.playing = true; st.t0 = performance.now() - st.p * 0; st.raf = requestAnimationFrame(loop); }
+    else if (st.playing) { st.playing = false; st.pausedAt = performance.now(); cancelAnimationFrame(st.raf); }
+    else { st.playing = true; st.t0 += performance.now() - st.pausedAt; st.last = 0; st.raf = requestAnimationFrame(loop); }
     setBtn();
   };
   // drag sideways to turn the model
@@ -868,7 +1144,7 @@ function renderToday() {
       h += '<div class="row-body">'
         + '<div class="demo" data-ex="' + id + '"><canvas role="img" aria-label="3D demo of ' + esc(ex.name) + '. Drag sideways to turn it."></canvas>'
         + '<span class="demo-hint" aria-hidden="true">Drag to turn</span><button type="button" class="demo-btn"></button></div>'
-        + '<p class="equip"><span class="swatch" aria-hidden="true"></span>Blue shows the main muscles: ' + esc(ex.muscles.toLowerCase()) + '. You\u2019ll need: ' + esc(ex.equip.toLowerCase()) + (ex.side ? '. Do each side.' : '.') + '</p>'
+        + '<p class="equip"><span class="swatch" aria-hidden="true"></span>Glowing gold shows the main muscles: ' + esc(ex.muscles.toLowerCase()) + '. You\u2019ll need: ' + esc(ex.equip.toLowerCase()) + (ex.side ? '. Do each side.' : '.') + '</p>'
         + '<ul class="cues">' + ex.cues.map(c => '<li>' + esc(c) + '</li>').join('') + '</ul>'
         + '<a class="vid" href="https://www.youtube.com/results?search_query=' + encodeURIComponent(ex.name + ' proper form') + '" target="_blank" rel="noopener">Watch a full video demo</a>'
         + '<div class="sets' + (ex.bw ? ' bw' : '') + '">'
