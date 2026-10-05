@@ -222,6 +222,10 @@ function lerpSpec(a, b, t) {
 }
 
 function solveBody(s, face) {
+  if (s.foreA !== undefined && s.elbow) {
+    const d = dirDeg(s.foreA);
+    s = Object.assign({}, s, { hand: [s.elbow[0] + d[0] * BODY.fore, s.elbow[1] + d[1] * BODY.fore] });
+  }
   const hip = [s.hip[0], s.hip[1], 0];
   const neck = V.add(hip, V.mul(dirDeg(s.T), BODY.torso));
   const head = V.add(neck, V.mul(dirDeg(s.H), BODY.head));
@@ -247,14 +251,15 @@ function solveBody(s, face) {
   }
   const hz = s.handZ !== undefined ? s.handZ : sw;
   const ep = s.ep || [-0.3, 1, 0.2];
-  const armN = s.elbow ? { mid: [s.elbow[0], s.elbow[1], sw + 2], end: [s.hand[0], s.hand[1], hz] }
+  const ez = s.elbowZ !== undefined ? s.elbowZ : sw + 2;
+  const armN = s.elbow ? { mid: [s.elbow[0], s.elbow[1], ez], end: [s.hand[0], s.hand[1], hz] }
     : ik3(shN, [s.hand[0], s.hand[1], hz], BODY.upper, BODY.fore, [ep[0], ep[1], ep[2] || 0.2]);
   let armF;
   if (s.hand2) {
     const hz2 = s.hand2Z !== undefined ? s.hand2Z : sw, ep2 = s.ep2 || ep;
     armF = ik3(shF, [s.hand2[0], s.hand2[1], -hz2], BODY.upper, BODY.fore, [ep2[0], ep2[1], -(ep2[2] || 0.2)]);
   } else {
-    armF = s.elbow ? { mid: [s.elbow[0], s.elbow[1], -(sw + 2)], end: [s.hand[0], s.hand[1], -hz] }
+    armF = s.elbow ? { mid: [s.elbow[0], s.elbow[1], -ez], end: [s.hand[0], s.hand[1], -hz] }
       : ik3(shF, [s.hand[0], s.hand[1], -hz], BODY.upper, BODY.fore, [ep[0], ep[1], -(ep[2] || 0.2)]);
   }
   const toe = (knee, ankle) => {
@@ -271,32 +276,33 @@ function solveBody(s, face) {
 }
 
 /* ---------- Camera ---------- */
-// Frame each exercise once so the coach fills the stage, like a dance game.
+// Frame each exercise from everything in the shot (body, weights, bench) as
+// seen from its starting camera angle, over the whole movement
 function fitFor(ex) {
   if (ex._fit) return ex._fit;
-  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = 155;
-  const take = (p, r) => { x0 = Math.min(x0, p[0] - r); x1 = Math.max(x1, p[0] + r); y0 = Math.min(y0, p[1] - r); y1 = Math.max(y1, p[1] + r); };
-  [ex.start, ex.end].forEach(s => {
-    const b = solveBody(normSpec(s), ex.face || 1);
-    take(b.head, 13); take(b.hip, 10); take(b.neck, 8);
-    [b.kneeN, b.kneeF, b.toeN, b.toeF, b.elbN, b.elbF].forEach(p => take(p, 7));
-    [b.wrN, b.wrF].forEach(p => take(p, 10));
+  const ya = (ex.yaw || 35) * Math.PI / 180, pa = 12 * Math.PI / 180;
+  const cy = Math.cos(ya), sy = Math.sin(ya), cp = Math.cos(pa), sp = Math.sin(pa);
+  const R = [cy, 0, -sy], D = [sy * sp, cp, cy * sp];
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  [0, 0.25, 0.5, 0.75, 1].forEach(t => {
+    buildPrims(ex, lerpSpec(normSpec(ex.start), normSpec(ex.end), t)).pts.forEach(([p, r]) => {
+      const x = V.dot(p, R), y = V.dot(p, D);
+      x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r); y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r);
+    });
   });
-  (ex.scene3 || []).forEach(o => {
-    if (o.t === 'rod') { take(o.a, 2); take(o.b, 2); } else take(o.c, Math.max(o.s[0], o.s[1]) / 2);
-  });
-  ex._fit = { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, w: x1 - x0, h: y1 - y0 };
+  const xc = (x0 + x1) / 2, yc = (y0 + y1) / 2;
+  ex._fit = { c: V.add(V.mul(R, xc), V.mul(D, yc)), w: x1 - x0, h: y1 - y0 };
   return ex._fit;
 }
 
 function makeCamera(yawDeg, pitchDeg, W, H, fit) {
   const ya = yawDeg * Math.PI / 180, pa = pitchDeg * Math.PI / 180;
   const cy = Math.cos(ya), sy = Math.sin(ya), cp = Math.cos(pa), sp = Math.sin(pa);
-  const s = Math.min(H * 0.78 / fit.h, W * 0.8 / Math.max(fit.w, 90)), F = 700;
+  const s = Math.min(H * 0.8 / fit.h, W * 0.84 / Math.max(fit.w, 70)), F = 700;
   return {
     s,
     p(pt) {
-      const x = pt[0] - fit.cx, y = pt[1] - fit.cy, z = pt[2];
+      const x = pt[0] - fit.c[0], y = pt[1] - fit.c[1], z = pt[2] - fit.c[2];
       const xr = x * cy - z * sy, zr = x * sy + z * cy;
       const yr = y * cp + zr * sp, d = zr * cp - y * sp;
       const k = F / (F - d);
@@ -307,6 +313,57 @@ function makeCamera(yawDeg, pitchDeg, W, H, fit) {
       return [xr, n[1] * cp + zr * sp, zr * cp - n[1] * sp];
     }
   };
+}
+
+/* ---------- Equipment ----------
+   Shared by both renderers so the weights sit in exactly the same place.
+   Hand-held weights hang from the centre of the hand; floor equipment rests on
+   the floor. Items: cyl (a, b, r), cap (a, b, ra, rb) and sph (c, r). */
+function equipment(ex, b, hN, hF, fwd) {
+  const out = [];
+  const cyl = (a, c, r, mat, round) => out.push({ t: 'cyl', a, b: c, r, mat, round: round || 0.4 });
+  const cap = (a, c, ra, rb, mat) => out.push({ t: 'cap', a, b: c, ra, rb, mat });
+  const sph = (c, r, mat) => out.push({ t: 'sph', c, r, mat });
+  // 'grip': handle across the fist, so it turns with the forearm (neutral grip)
+  const gripAxis = (el, wr) => { const fo = V.norm(V.sub(wr, el)); return V.norm([fo[1], -fo[0], 0.0001]); };
+  const dumbbell = (c, axis) => {
+    const a = Array.isArray(axis) ? axis : axis === 'y' ? [0, 1, 0] : axis === 'x' ? [1, 0, 0] : [0, 0, 1];
+    cyl(V.add(c, V.mul(a, -5.5)), V.add(c, V.mul(a, 5.5)), 1.6, 'steel', 0.3);
+    cyl(V.add(c, V.mul(a, -9.8)), V.add(c, V.mul(a, -5.2)), 5.4, 'iron', 0.9);
+    cyl(V.add(c, V.mul(a, 5.2)), V.add(c, V.mul(a, 9.8)), 5.4, 'iron', 0.9);
+  };
+  (ex.props || []).forEach(pr => {
+    if (pr === 'db') {
+      const g = ex.dbAxis === 'grip';
+      dumbbell(hN, g ? gripAxis(b.elbN, b.wrN) : ex.dbAxis);
+      if (!b.oneSided) dumbbell(hF, g ? gripAxis(b.elbF, b.wrF) : ex.dbAxis);
+    }
+    else if (pr === 'goblet') dumbbell(V.add(V.lerp(hN, hF, 0.5), [0, ex.gobletDY || -2, 0]), 'y');
+    else if (pr === 'hipdb') dumbbell(V.add(V.add(b.hip, V.mul(fwd, ex.hipDbOut || 15)), V.mul(b.tdir, ex.hipDbUp || 2)));
+    else if (pr === 'trapbar') {
+      // hexagon-style frame that surrounds the lifter: handles in the hands,
+      // rails outside the legs, front and back bars clear of shins and hips
+      const x = (hN[0] + hF[0]) / 2, y = (hN[1] + hF[1]) / 2, hz = Math.abs(hN[2]), rz = hz + 5, yb = y + 1;
+      [1, -1].forEach(sg => {
+        cyl([x - 7, y, sg * hz], [x + 7, y, sg * hz], 1.6, 'steel');
+        cyl([x - 7, y, sg * hz], [x - 7, yb, sg * rz], 1.2, 'steel');
+        cyl([x + 7, y, sg * hz], [x + 7, yb, sg * rz], 1.2, 'steel');
+        cyl([x - 26, yb, sg * rz], [x + 26, yb, sg * rz], 1.8, 'steel');
+        cyl([x, yb, sg * rz], [x, yb, sg * 46], 2, 'steel');
+        cyl([x, yb, sg * 31], [x, yb, sg * 37], 15.5, 'iron', 1.2);
+      });
+      cyl([x - 26, yb, rz], [x - 26, yb, -rz], 1.8, 'steel');
+      cyl([x + 26, yb, rz], [x + 26, yb, -rz], 1.8, 'steel');
+    } else if (pr === 'wheel') {
+      // the axle runs through both hands; the wheel sits on the floor
+      const c = [(hN[0] + hF[0]) / 2, FLOOR - 8.5, 0];
+      cyl(V.add(c, [0, 0, -3.2]), V.add(c, [0, 0, 3.2]), 8.5, 'iron', 1.5);
+      cyl(V.add(c, [0, 0, -9]), V.add(c, [0, 0, 9]), 1.4, 'steel', 0.3);
+    } else if (pr === 'ball') {
+      sph([(b.ankleN[0] + b.ankleF[0]) / 2 + 3, FLOOR - 13.5, 0], 13.5, 'ball');
+    } else if (pr === 'band') cap(hN, hF, 0.8, 0.8, 'band');
+  });
+  return out;
 }
 
 /* ---------- Body model ----------
@@ -324,7 +381,8 @@ const MAT = {
   iron: ['#9CA2A8', '#4B5056', '#23272B', '#141618'],
   ball: ['#C3CCD6', '#8796A8', '#56637A', '#3D475A'],
   band: ['#E0907F', '#B54B3F', '#7B2C24', '#5A1E19'],
-  frame: ['#F0F2F3', '#B7BDC2', '#70777D', '#575D62']
+  frame: ['#F0F2F3', '#B7BDC2', '#70777D', '#575D62'],
+  steel: ['#F0F2F3', '#B7BDC2', '#70777D', '#575D62']
 };
 const EDGE = 'rgba(72,40,24,.38)';
 const LIGHT2 = [-0.5, -0.86];
@@ -446,36 +504,11 @@ function buildBody(ex, spec, cam, flat) {
     cap(heel, toe, 3.7, 3, 'shoe', null, 2);
   });
 
-  /* equipment that moves with the body */
+  /* equipment */
   group(2);
-  const dumbbell = (c, axis) => {
-    const a = axis === 'y' ? [0, 1, 0] : [0, 0, 1];
-    cap(V.add(c, V.mul(a, -5)), V.add(c, V.mul(a, 5)), 1.7, 1.7, 'iron');
-    cap(V.add(c, V.mul(a, -9.5)), V.add(c, V.mul(a, -5.5)), 5.6, 5.6, 'iron');
-    cap(V.add(c, V.mul(a, 5.5)), V.add(c, V.mul(a, 9.5)), 5.6, 5.6, 'iron');
-  };
-  const hN = hands.N, hF = hands.F;
-  (ex.props || []).forEach(pr => {
-    if (pr === 'db') { dumbbell(hN); if (!b.oneSided) dumbbell(hF); }
-    else if (pr === 'goblet') dumbbell([(hN[0] + hF[0]) / 2, (hN[1] + hF[1]) / 2, 0], 'y');
-    else if (pr === 'hipdb') dumbbell([b.hip[0], b.hip[1] - 11, 0]);
-    else if (pr === 'trapbar') {
-      const y = hN[1], x = hN[0], hz = Math.abs(hN[2]);
-      [1, -1].forEach(sg => {
-        cap([x - 9, y, sg * hz], [x + 9, y, sg * hz], 1.8, 1.8, 'iron');
-        cap([x, y + 1, sg * (hz + 1)], [x, y + 1, sg * 40], 2.1, 2.1, 'iron');
-        cap([x, y + 1, sg * 30], [x, y + 1, sg * 35], 14, 14, 'iron');
-      });
-      cap([x - 9, y, hz], [x - 9, y, -hz], 1.6, 1.6, 'iron');
-      cap([x + 9, y, hz], [x + 9, y, -hz], 1.6, 1.6, 'iron');
-    } else if (pr === 'wheel') {
-      const c = [hN[0], hN[1] + 4, 0];
-      cap(V.add(c, [0, 0, -3]), V.add(c, [0, 0, 3]), 8.5, 8.5, 'iron');
-      cap(hN, hF, 1.6, 1.6, 'iron');
-    } else if (pr === 'ball') {
-      const c = [(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0];
-      ell(c, [[13.5, 0, 0], [0, 13.5, 0], [0, 0, 13.5]], 'ball');
-    } else if (pr === 'band') cap(hN, hF, 0.9, 0.9, 'band');
+  equipment(ex, b, hands.N, hands.F, f).forEach(o => {
+    if (o.t === 'sph') ell(o.c, [[o.r, 0, 0], [0, o.r, 0], [0, 0, o.r]], o.mat);
+    else cap(o.a, o.b, o.ra || o.r, o.rb || o.r, o.mat);
   });
 
   groups.forEach(gr => {
@@ -653,7 +686,7 @@ function drawFloorShadow(ctx, W, H, ex, spec, cam, st) {
 function renderFrame(ctx, W, H, ex, st) {
   const fit = fitFor(ex), cam = makeCamera(st.yaw, st.pitch, W, H, fit);
   const spec = lerpSpec(normSpec(ex.start), normSpec(ex.end), st.p);
-  drawStudio(ctx, W, H, cam.p([fit.cx, FLOOR, 0])[1]);
+  drawStudio(ctx, W, H, cam.p([fit.c[0], FLOOR, fit.c[2]])[1]);
   drawFloorShadow(ctx, W, H, ex, spec, cam, st);
   const lw = Math.max(0.7, cam.s * 0.4);
   paintScene(ctx, ex, cam, lw);
@@ -801,34 +834,13 @@ function buildPrims(ex, spec) {
 
   /* equipment */
   group();
-  const dumbbell = (c, axis) => {
-    const a = axis === 'y' ? [0, 1, 0] : [0, 0, 1];
-    cyl(V.add(c, V.mul(a, -5.5)), V.add(c, V.mul(a, 5.5)), 1.6, GLM.steel, 0.3);
-    cyl(V.add(c, V.mul(a, -9.8)), V.add(c, V.mul(a, -5.2)), 5.4, GLM.iron, 0.9);
-    cyl(V.add(c, V.mul(a, 5.2)), V.add(c, V.mul(a, 9.8)), 5.4, GLM.iron, 0.9);
-  };
-  const hN = hands.N, hF = hands.F;
-  (ex.props || []).forEach(pr => {
-    if (pr === 'db') { dumbbell(hN); if (!b.oneSided) dumbbell(hF); }
-    else if (pr === 'goblet') dumbbell([(hN[0] + hF[0]) / 2, (hN[1] + hF[1]) / 2 - 2, 0], 'y');
-    else if (pr === 'hipdb') dumbbell([b.hip[0], b.hip[1] - 11, 0]);
-    else if (pr === 'trapbar') {
-      const y = hN[1], x = hN[0], hz = Math.abs(hN[2]);
-      [1, -1].forEach(sg => {
-        cyl([x - 9, y, sg * hz], [x + 9, y, sg * hz], 1.7, GLM.steel, 0.3);
-        cyl([x, y + 1, sg * (hz + 1)], [x, y + 1, sg * 41], 2, GLM.steel, 0.3);
-        cyl([x, y + 1, sg * 29], [x, y + 1, sg * 35], 15, GLM.iron, 1.2);
-      });
-      cyl([x - 9, y, hz], [x - 9, y, -hz], 1.6, GLM.steel, 0.3);
-      cyl([x + 9, y, hz], [x + 9, y, -hz], 1.6, GLM.steel, 0.3);
-    } else if (pr === 'wheel') {
-      const c = [hN[0], hN[1] + 4, 0];
-      cyl(V.add(c, [0, 0, -3]), V.add(c, [0, 0, 3]), 8.5, GLM.iron, 1.5);
-      cyl(hN, hF, 1.4, GLM.steel, 0.3);
-    } else if (pr === 'ball') {
-      sph([(b.ankleN[0] + b.ankleF[0]) / 2 + 4, (b.ankleN[1] + b.ankleF[1]) / 2 + 13.5, 0], 13.5, GLM.ball, 0);
-    } else if (pr === 'band') cap(hN, hF, 0.8, 0.8, GLM.band, 0);
+  const propStart = n;
+  equipment(ex, b, hands.N, hands.F, f).forEach(o => {
+    if (o.t === 'sph') sph(o.c, o.r, GLM[o.mat], 0);
+    else if (o.t === 'cap') cap(o.a, o.b, o.ra, o.rb, GLM[o.mat], 0);
+    else cyl(o.a, o.b, o.r, GLM[o.mat], o.round);
   });
+  const sceneStart = n;
   // benches and frames
   (ex.scene3 || []).forEach(o => {
     if (o.t === 'rod') cyl(o.a, o.b, o.r || 1.7, GLM.steel, 0.4);
@@ -855,7 +867,7 @@ function buildPrims(ex, spec) {
   const bc = V.mul(V.add(lo, hi), 0.5);
   let br = 0;
   all.forEach(([c, r]) => { br = Math.max(br, V.len(V.sub(c, bc)) + r); });
-  return { data, groups: bounds, bound: [bc[0], bc[1], bc[2], br] };
+  return { data, groups: bounds, bound: [bc[0], bc[1], bc[2], br], n, propStart, sceneStart, hands, pts: groups.flatMap(gr => gr.pts) };
 }
 
 const GL_VS = `#version 300 es
@@ -1067,9 +1079,9 @@ function renderGL(R, W, H, scale, ex, st) {
   const sc = buildPrims(ex, spec);
   const ya = st.yaw * Math.PI / 180, pa = st.pitch * Math.PI / 180;
   const cy = Math.cos(ya), sy = Math.sin(ya), cp = Math.cos(pa), sp = Math.sin(pa);
-  const s = Math.min(H * 0.78 / fit.h, W * 0.8 / Math.max(fit.w, 90)), F = 700;
+  const s = Math.min(H * 0.8 / fit.h, W * 0.84 / Math.max(fit.w, 70)), F = 700;
   const Rv = [cy, 0, -sy], Dv = [sy * sp, cp, cy * sp], Vv = [sy * cp, -sp, cy * cp];
-  const ctr = [fit.cx, fit.cy, 0];
+  const ctr = fit.c;
   gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GL_MAXP * 4, 1, gl.RGBA, gl.FLOAT, sc.data);
@@ -1184,6 +1196,27 @@ const EXERCISES = {
            'Drive through your heels until your shins are vertical.',
            'Squeeze your glutes at the top with your chin tucked, then lower.'],
   },
+  latraise: {
+    name: 'Dumbbell lateral raise', sets: 3, reps: [12, 15], rest: 60, inc: 5,
+    equip: 'Light dumbbells', muscles: 'Side shoulders',
+    cues: ['Stand tall with a slight bend in your elbows and the dumbbells at your sides.',
+           'Raise your arms out to the sides until they\u2019re level with your shoulders.',
+           'Lead with your elbows, pause, then lower slowly. Go light; no swinging.'],
+  },
+  ohtri: {
+    name: 'Overhead triceps extension', sets: 3, reps: [10, 12], rest: 60, inc: 5,
+    equip: 'Dumbbell', muscles: 'Triceps',
+    cues: ['Hold one dumbbell overhead with both hands cupping the top end.',
+           'Keep your elbows pointing up and lower the weight behind your head.',
+           'Straighten your arms to lift it back up without flaring your elbows.'],
+  },
+  curl: {
+    name: 'Dumbbell hammer curl', sets: 3, reps: [10, 12], rest: 60, inc: 5,
+    equip: 'Dumbbells', muscles: 'Biceps, forearms',
+    cues: ['Stand tall with the dumbbells at your sides and palms facing in.',
+           'Keep your elbows pinned to your sides and curl the weights to your shoulders.',
+           'Lower all the way down with control. No swinging your body.'],
+  },
   ballcurl: {
     name: 'Stability ball hamstring curl', sets: 3, reps: [8, 12], bw: true, rest: 60, inc: 0,
     equip: 'Stability ball', muscles: 'Hamstrings, glutes',
@@ -1194,10 +1227,13 @@ const EXERCISES = {
 };
 
 const DAYS = {
-  A: { name: 'Day A', focus: 'Hinge and push', ids: ['trapbar', 'dbbench', 'row1', 'pullapart', 'wheel'] },
-  B: { name: 'Day B', focus: 'Squat and press', ids: ['goblet', 'ohp', 'inclinerow', 'rdl', 'deadbug'] },
-  C: { name: 'Day C', focus: 'Single-leg and glutes', ids: ['split', 'pushup', 'thrust', 'ballcurl', 'pullapart'] }
+  push: { name: 'Push', focus: 'Chest, shoulders, triceps', ids: ['dbbench', 'ohp', 'pushup', 'latraise', 'ohtri'] },
+  pull: { name: 'Pull', focus: 'Back, rear shoulders, biceps', ids: ['row1', 'inclinerow', 'pullapart', 'curl', 'wheel'] },
+  legs: { name: 'Legs', focus: 'Quads, hamstrings, glutes', ids: ['trapbar', 'goblet', 'split', 'thrust', 'ballcurl'] }
 };
+// sessions logged under the earlier A/B/C plan keep their names in history
+const OLD_DAYS = { A: 'Day A', B: 'Day B', C: 'Day C' };
+const dayName = k => DAYS[k] ? DAYS[k].name : OLD_DAYS[k] || 'Workout';
 
 const WARMUP = [
   { id: 'catcow', text: 'Cat-cow', detail: '8 slow reps on hands and knees' },
@@ -1216,56 +1252,56 @@ const legRods = (x, top) => [
 ];
 const EX3 = {
   trapbar: {
-    face: 1, yaw: 35, work: ['glutes', 'thighs', 'back'], props: ['trapbar'],
-    start: { hip: [90, 118], T: 50, H: 38, foot: [110, 152], kp: [1, 0], hand: [123, 133], handZ: 16, ep: [-0.3, 1, 0.1] },
-    end: { hip: [110, 96], T: 0, H: 0, foot: [110, 152], kp: [1, 0], hand: [110, 98], handZ: 16, ep: [-0.3, 1, 0.1] }
+    face: 1, yaw: 62, work: ['glutes', 'thighs', 'back'], props: ['trapbar'],
+    start: { hip: [90, 118], T: 50, H: 38, foot: [110, 152], kp: [1, 0], hand: [110, 133], handZ: 20, ep: [-0.3, 1, 0.1] },
+    end: { hip: [110, 96], T: 0, H: 0, foot: [110, 152], kp: [1, 0], hand: [110, 98], handZ: 20, ep: [-0.3, 1, 0.1] }
   },
   dbbench: {
     face: 1, yaw: 35, work: ['chest', 'shoulders', 'arms'], props: ['db'],
-    scene3: [{ t: 'box', c: [88, 128, 0], s: [92, 8, 24] }].concat(legRods(54, 132), legRods(126, 132)),
-    start: { hip: [112, 120], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [72, 102], handZ: 18, ep: [1, 0.3, 0.6] },
-    end: { hip: [112, 120], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [70, 74], handZ: 14, ep: [1, 0.3, 0.6] }
+    scene3: [{ t: 'box', c: [82, 128, 0], s: [80, 8, 24] }].concat(legRods(50, 132), legRods(114, 132)),
+    start: { hip: [112, 112.5], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [72, 94.5], handZ: 18, ep: [1, 0.3, 0.6] },
+    end: { hip: [112, 112.5], T: -90, H: -90, foot: [146, 152], footZ: 14, kp: [0.4, -1], hand: [70, 66.5], handZ: 14, ep: [1, 0.3, 0.6] }
   },
   row1: {
-    face: -1, yaw: -35, work: ['back', 'arms'], props: ['db'],
+    face: -1, yaw: -35, work: ['back', 'arms'], props: ['db'], dbAxis: 'grip',
     scene3: [{ t: 'box', c: [119, 128, 0], s: [106, 8, 24] }].concat(legRods(78, 132), legRods(160, 132)),
-    start: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 123], foot2: [164, 123], foot2Z: 5,
-             hand: [95, 132], handZ: 15, ep: [-0.5, 1, 0.2], hand2: [88, 123], hand2Z: 6, ep2: [1, 0.3, 0] },
-    end: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 123], foot2: [164, 123], foot2Z: 5,
-           hand: [112, 104], handZ: 15, ep: [0.5, -1, 0.2], hand2: [88, 123], hand2Z: 6, ep2: [1, 0.3, 0] }
+    start: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 119], foot2: [164, 119], foot2Z: 5,
+             hand: [95, 132], handZ: 15, ep: [-0.5, 1, 0.2], hand2: [88, 118], hand2Z: 6, ep2: [1, 0.3, 0] },
+    end: { hip: [136, 96], T: -78, H: -62, foot: [144, 152], footZ: 13, kp: [-1, 0], knee2: [136, 119], foot2: [164, 119], foot2Z: 5,
+           hand: [112, 104], handZ: 15, ep: [0.5, -1, 0.2], hand2: [88, 118], hand2Z: 6, ep2: [1, 0.3, 0] }
   },
   pullapart: {
     face: 1, yaw: 55, work: ['shoulders', 'back'], props: ['band'],
     start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [152, 62], handZ: 5, ep: [0, 1, 0.4] },
-    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 62], handZ: 58, ep: [0, 1, 0.4] }
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [126, 62], handZ: 54, ep: [0, 1, 0.4] }
   },
   wheel: {
     face: 1, yaw: 30, work: ['core', 'shoulders'], props: ['wheel'],
-    start: { hip: [104, 120], T: 55, H: 50, knee: [104, 148], foot: [76, 148], hand: [148, 140], handZ: 7, ep: [0, 1, 0.3] },
-    end: { hip: [114, 122], T: 72, H: 70, knee: [104, 148], foot: [76, 148], hand: [192, 142], handZ: 7, ep: [0, 1, 0.3] }
+    start: { hip: [104, 120], T: 55, H: 50, knee: [104, 148], foot: [76, 148], hand: [148, 143], handZ: 7, ep: [0, 1, 0.3] },
+    end: { hip: [114, 122], T: 72, H: 70, knee: [104, 148], foot: [76, 148], hand: [192, 144], handZ: 7, ep: [0, 1, 0.3] }
   },
   goblet: {
-    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['goblet'],
-    start: { hip: [110, 96], T: 0, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [118, 66], handZ: 5, ep: [0, 1, 0.5] },
-    end: { hip: [90, 122], T: 25, H: 15, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [118, 92], handZ: 5, ep: [0, 1, 0.5] }
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['goblet'], gobletDY: 6,
+    start: { hip: [110, 96], T: 0, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [124, 64], handZ: 5, ep: [0, 1, 0.5] },
+    end: { hip: [90, 122], T: 25, H: 15, foot: [110, 152], footZ: 12, kp: [1, 0], hand: [126, 90], handZ: 5, ep: [0, 1, 0.5] }
   },
   ohp: {
     face: 1, yaw: 35, work: ['shoulders', 'arms'], props: ['db'],
-    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [118, 50], handZ: 20, ep: [0.2, 1, 0.5] },
-    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 8], handZ: 15, ep: [0.2, 1, 0.5] }
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [116, 46], handZ: 24, ep: [0.2, 1, 0.5] },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 8], handZ: 16, ep: [0.2, 1, 0.5] }
   },
   inclinerow: {
-    face: 1, yaw: 35, work: ['back', 'arms'], props: ['db'],
-    scene3: [{ t: 'box', c: [138, 110, 0], s: [80, 8, 22], rot: -45 },
-             { t: 'rod', a: [140, 112, 0], b: [140, 152, 0], r: 2.2 }, { t: 'rod', a: [112, 152, 0], b: [170, 152, 0], r: 2 },
+    face: 1, yaw: 35, work: ['back', 'arms'], props: ['db'], dbAxis: 'grip',
+    scene3: [{ t: 'box', c: [152.2, 105.8, 0], s: [54, 8, 22], rot: -45 },
+             { t: 'rod', a: [152, 109, 0], b: [152, 152, 0], r: 2.2 }, { t: 'rod', a: [112, 152, 0], b: [170, 152, 0], r: 2 },
              { t: 'rod', a: [112, 152, -12], b: [112, 152, 12], r: 1.8 }, { t: 'rod', a: [170, 152, -12], b: [170, 152, 12], r: 1.8 }],
-    start: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [150, 130], handZ: 14, ep: [-1, 0.2, 0.3] },
-    end: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [130, 112], handZ: 16, ep: [-1, -0.6, 0.5] }
+    start: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [150, 130], handZ: 17, ep: [-1, 0.2, 0.3] },
+    end: { hip: [119, 117], T: 45, H: 45, foot: [92, 152], footZ: 14, kp: [0.5, 0.5], hand: [130, 112], handZ: 22, ep: [-1, -0.6, 0.5] }
   },
   rdl: {
     face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['db'],
-    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [116, 98], handZ: 10, ep: [-0.3, 1, 0.2] },
-    end: { hip: [94, 104], T: 65, H: 50, foot: [110, 152], kp: [1, 0], hand: [120, 118], handZ: 10, ep: [-0.3, 1, 0.2] }
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [124, 98], handZ: 13, ep: [-0.3, 1, 0.2] },
+    end: { hip: [94, 104], T: 65, H: 50, foot: [110, 152], kp: [1, 0], hand: [130, 128], handZ: 13, ep: [-0.3, 1, 0.2] }
   },
   deadbug: {
     face: 1, yaw: 30, work: ['core'], props: [],
@@ -1275,10 +1311,10 @@ const EX3 = {
            hand: [30, 146], ep: [1, 0, 0], hand2: [80, 102], ep2: [1, 0, 0] }
   },
   split: {
-    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['db'],
-    scene3: [{ t: 'box', c: [49, 128, 0], s: [54, 8, 24] }].concat(legRods(32, 132), legRods(66, 132)),
-    start: { hip: [116, 102], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [64, 122], foot2Z: 4, kp2: [0, 1], hand: [120, 106], handZ: 17 },
-    end: { hip: [112, 124], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [64, 122], foot2Z: 4, kp2: [0, 1], hand: [118, 128], handZ: 17 }
+    face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['db'], dbAxis: 'grip',
+    scene3: [{ t: 'box', c: [46, 128, 0], s: [48, 8, 24] }].concat(legRods(30, 132), legRods(62, 132)),
+    start: { hip: [116, 102], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [68, 118], foot2Z: 4, kp2: [0, 1], hand: [120, 106], handZ: 22 },
+    end: { hip: [112, 124], T: 5, H: 5, foot: [138, 152], footZ: 7, kp: [1, 0], foot2: [68, 118], foot2Z: 4, kp2: [0, 1], hand: [118, 128], handZ: 22 }
   },
   pushup: {
     face: 1, yaw: 35, work: ['chest', 'arms', 'shoulders'], props: [],
@@ -1286,15 +1322,30 @@ const EX3 = {
     end: { hip: [111, 140], neck: [153, 134], H: 78, foot: [56, 148], footZ: 6, kp: [0, 1], hand: [150, 150], handZ: 18, ep: [-1, 0.1, 0.5] }
   },
   thrust: {
-    face: 1, yaw: 35, work: ['glutes', 'thighs'], props: ['hipdb'],
-    scene3: [{ t: 'box', c: [48, 128, 0], s: [48, 8, 26] }].concat(legRods(34, 132), legRods(62, 132)),
+    face: 1, yaw: 35, work: ['glutes', 'thighs'], props: ['hipdb'], hipDbOut: 17, hipDbUp: 8,
+    scene3: [{ t: 'box', c: [48, 133, 0], s: [48, 8, 26] }].concat(legRods(34, 137), legRods(62, 137)),
     start: { hip: [100, 142], neck: [66, 114], H: -50, foot: [140, 152], footZ: 12, kp: [0.5, -0.5], hand: [100, 132], handZ: 12, ep: [0, -1, 0.3] },
     end: { hip: [112, 116], neck: [68, 116], H: -90, foot: [140, 152], footZ: 12, kp: [0.5, -0.5], hand: [112, 106], handZ: 12, ep: [0, -1, 0.3] }
   },
+  latraise: {
+    face: 1, yaw: 70, work: ['shoulders'], props: ['db'], dbAxis: 'x',
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [112, 98], handZ: 23, ep: [0, 1, 0.6] },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], hand: [113, 62], handZ: 54, ep: [0, -1, 0.4] }
+  },
+  ohtri: {
+    face: 1, yaw: 30, work: ['arms'], props: ['goblet'], gobletDY: 5,
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [110, 32], elbowZ: 12, foreA: 3, handZ: 4 },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [112, 30], elbowZ: 12, foreA: -118, handZ: 4 }
+  },
+  curl: {
+    face: 1, yaw: 30, work: ['arms'], props: ['db'], dbAxis: 'grip',
+    start: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [108, 80], elbowZ: 18, foreA: 172, handZ: 23 },
+    end: { hip: [110, 96], T: 0, foot: [110, 152], kp: [1, 0], elbow: [109, 80], elbowZ: 18, foreA: 45, handZ: 21 }
+  },
   ballcurl: {
     face: 1, yaw: 35, work: ['thighs', 'glutes'], props: ['ball'],
-    start: { hip: [108, 118], neck: [72, 146], foot: [164, 124], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] },
-    end: { hip: [108, 118], neck: [72, 146], foot: [128, 126], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] }
+    start: { hip: [108, 118], neck: [72, 146], H: -96, foot: [164, 124], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] },
+    end: { hip: [108, 118], neck: [72, 146], H: -96, foot: [128, 126], footZ: 4, kp: [0, -1], hand: [118, 148], handZ: 20, ep: [0, -1, 0] }
   }
 };
 Object.keys(EX3).forEach(k => Object.assign(EXERCISES[k], EX3[k]));
@@ -1339,8 +1390,8 @@ function mondayISO() {
 const weekCount = () => state.sessions.filter(s => s.date >= mondayISO()).length;
 function nextDay() {
   const last = state.sessions[state.sessions.length - 1];
-  if (!last) return 'A';
-  return { A: 'B', B: 'C', C: 'A' }[last.day] || 'A';
+  if (!last) return 'push';
+  return { push: 'pull', pull: 'legs', legs: 'push' }[last.day] || 'push';
 }
 const targetSets = ex => state.ease ? Math.max(2, ex.sets - 1) : ex.sets;
 function repText(ex) {
@@ -1491,8 +1542,8 @@ function renderToday() {
   const warmDone = WARMUP.filter(w => d.warm[w.id]).length;
 
   let h = '<section class="hero"><div class="week">' + wkDots + '<span>' + wk + ' of 3 workouts this week</span></div>'
-    + '<h1>' + esc(info.focus) + '</h1>'
-    + '<p>' + info.ids.length + ' exercises, about 40 minutes with the warm-up.</p>'
+    + '<h1>' + esc(info.name) + ' day</h1>'
+    + '<p>' + esc(info.focus) + '. ' + info.ids.length + ' exercises, about 40 minutes with the warm-up.</p>'
     + '<div class="days" role="group" aria-label="Choose workout day">'
     + Object.keys(DAYS).map(k => '<button type="button" data-act="day" data-day="' + k + '" aria-pressed="' + (k === day) + '">' + DAYS[k].name + '<small>' + esc(DAYS[k].focus) + '</small></button>').join('')
     + '</div></section>';
@@ -1586,7 +1637,7 @@ function renderProgress() {
   state.sessions.slice().reverse().slice(0, 15).forEach(s => {
     const names = Object.keys(s.sets || {});
     const count = names.reduce((a, id) => a + s.sets[id].length, 0);
-    h += '<details><summary>' + fmtDate(s.date, true) + ', ' + DAYS[s.day].name + ' (' + count + ' sets)</summary><ul>'
+    h += '<details><summary>' + fmtDate(s.date, true) + ', ' + dayName(s.day) + ' (' + count + ' sets)</summary><ul>'
       + names.map(id => { const e = EXERCISES[id]; return '<li>' + esc(e.name) + ': ' + s.sets[id].map(t => e.bw ? t.r : fmtNum(t.w) + '\u00D7' + t.r).join(', ') + '</li>'; }).join('')
       + '</ul></details>';
   });
@@ -1594,7 +1645,7 @@ function renderProgress() {
 }
 
 function renderPlan() {
-  let h = '<h2>Your week</h2><p class="muted" style="margin:0 0 14px;max-width:52ch">Three full-body mornings. Do A, B, C in order on any three days that work, with at least a day of rest between. Rest times run after every set.</p>';
+  let h = '<h2>Your week</h2><p class="muted" style="margin:0 0 14px;max-width:52ch">Push, pull, legs. Do the three days in order on any three days of the week, ideally with a rest day between. Rest times run after every set.</p>';
   Object.keys(DAYS).forEach(k => {
     const d = DAYS[k];
     h += '<section class="plan-day"><h3>' + d.name + ': ' + esc(d.focus) + '</h3><ul>'
@@ -1695,7 +1746,7 @@ document.addEventListener('click', e => {
   else if (act === 'unit') { state.unit = el.dataset.u; save(); render(); }
   else if (act === 'export') exportData();
   else if (act === 'import') $('#importFile').click();
-  else if (act === 'reset') { if (confirm('Erase every logged workout on this device? This can\u2019t be undone.')) { state = JSON.parse(JSON.stringify(DEFAULTS)); ui.day = 'A'; ui.open = null; save(); render(); toast('All data erased.'); } }
+  else if (act === 'reset') { if (confirm('Erase every logged workout on this device? This can\u2019t be undone.')) { state = JSON.parse(JSON.stringify(DEFAULTS)); ui.day = 'push'; ui.open = null; save(); render(); toast('All data erased.'); } }
 });
 document.addEventListener('change', e => {
   const el = e.target, act = el.dataset && el.dataset.act;
